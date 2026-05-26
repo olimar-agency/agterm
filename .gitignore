@@ -2,3 +2,8 @@
 *.exe
 .env
 .DS_Store
+
+# Local chat history
+HISTORY/
+.claude/
+.github/hooks/export-history.json
