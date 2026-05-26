@@ -110,11 +110,13 @@ type Block struct {
 
 ```json
 {
+  "version": 1,
   "provider": "ollama",
   "providers": {
     "anthropic": {
       "api_key": "$ANTHROPIC_API_KEY",
-      "model": "claude-sonnet-4-6"
+      "model": "claude-sonnet-4-6",
+      "send_context": false
     },
     "ollama": {
       "base_url": "http://localhost:11434",
@@ -123,11 +125,13 @@ type Block struct {
     "openrouter": {
       "api_key": "$OPENROUTER_API_KEY",
       "base_url": "https://openrouter.ai/api/v1",
-      "model": "meta-llama/llama-3.1-8b-instruct:free"
+      "model": "meta-llama/llama-3.1-8b-instruct:free",
+      "send_context": false
     },
     "gemini": {
       "api_key": "$GEMINI_API_KEY",
-      "model": "gemini-2.0-flash"
+      "model": "gemini-2.0-flash",
+      "send_context": false
     }
   }
 }
@@ -137,9 +141,9 @@ type Block struct {
 
 - **Precedence** (highest → lowest): CLI flags → environment variables → config file → defaults
 - **Env var expansion**: all `api_key` values support `$VAR` syntax, expanded at load time
-- **Validation**: on startup, agterm checks that the active provider has a reachable endpoint and non-empty API key (where required); prints a clear error and exits rather than silently failing
-- **Versioning**: config file gains a `"version": 1` field; migrations run automatically on load when the version is behind
-- **Schema version**: current is `1`
+- **Validation**: on startup, agterm validates config structure and logs warnings for missing/invalid AI settings — **the shell always starts regardless**; AI features show an inline error state rather than blocking the terminal
+- **Versioning**: `"version"` field is written by agterm on first config save; if absent, loader assumes `version=0` and migrates forward automatically; migrations run on load, never on read-only operations
+- **Schema version**: current is `1`; `--dry-run` on `agterm install` / `agterm migrate` shows pending changes without modifying files
 
 ---
 
@@ -159,11 +163,21 @@ type Block struct {
 - [ ] Shell integration scripts: `agterm install` injects OSC 133 hooks into shell RC file
 
   Shell integration details:
-  - Idempotent injection (check for existing agterm block before appending)
+  - Idempotent injection (check for `# agterm-start` / `# agterm-end` sentinel comments before appending)
   - Backs up RC file before modifying (`~/.zshrc.agterm.bak`)
-  - `agterm uninstall` cleanly removes injected lines
-  - Compatibility matrix: `zsh` (preexec/precmd), `bash` (PROMPT_COMMAND / DEBUG trap), `fish` (fish_preexec/fish_postexec)
-  - Known conflicts to warn about: oh-my-zsh overrides `preexec`; starship may interfere — emit a warning if detected, link to workaround docs
+  - `agterm install --dry-run` prints what would be written without touching files
+  - `agterm uninstall` cleanly removes lines between sentinels
+  - **Hook chaining** — hooks must wrap, not replace:
+    ```bash
+    # agterm-start
+    _agterm_preexec_orig="${functions[preexec]}"
+    preexec() { printf '\x1b]133;C\x07'; [[ -n "$_agterm_preexec_orig" ]] && eval "$_agterm_preexec_orig" "$@"; }
+    _agterm_precmd_orig="${functions[precmd]}"
+    precmd()  { printf '\x1b]133;D;%s\x07' "$?"; [[ -n "$_agterm_precmd_orig" ]] && eval "$_agterm_precmd_orig"; }
+    # agterm-end
+    ```
+  - Compatibility matrix: `zsh` (preexec/precmd chaining above), `bash` (append to PROMPT_COMMAND; use DEBUG trap for preexec), `fish` (fish_preexec/fish_postexec — additive by design)
+  - Known conflicts: oh-my-zsh defines its own hook arrays — detect and use `add-zsh-hook` instead of direct assignment; starship resets precmd — emit a warning if detected, link to workaround docs
 
 ---
 
@@ -182,7 +196,7 @@ type Block struct {
 
 **Failure modes**:
 - OSC 133 hooks absent (user skipped `agterm install`): fall back to raw passthrough mode with a one-time prompt to run `agterm install`
-- OSC marker missing mid-session (e.g. shell plugin conflict): treat next prompt appearance as implicit block end; log to debug trace
+- OSC marker missing mid-session (e.g. shell plugin conflict): fall back to regex-based prompt heuristic — scan output for common prompt patterns (`\$\s`, `%\s`, `❯\s`, `#\s` at end of line after a newline); this is best-effort and may split incorrectly; log mismatch to debug trace
 - Partial output on session close: flush any open block as-is with `ExitCode = -1`
 
 **Performance targets**:
@@ -217,12 +231,13 @@ Block appearance:
 - No provider configured: show setup prompt pointing to config file
 
 **Privacy / security**:
-- Before sending any command output to a remote provider, show a one-time consent notice explaining what data leaves the machine
-- Remote providers (Anthropic, OpenAI, Gemini, OpenRouter): opt-in per provider in config (`"send_context": true`)
-- Ollama is local-only; no consent notice required
+- **Default**: `send_context` is `false` for all remote providers — AI panel opens but only the user's typed question is sent, not command output, until the user explicitly opts in
+- **Opt-in flow**: first time a user enables context for a remote provider, agterm shows a one-time consent notice listing exactly what will be sent; consent is recorded as `"send_context": true` in config
+- **Precedence**: `local_only: true` in config overrides all per-provider `send_context` flags and prevents any outbound AI request; takes priority over everything except explicit CLI `--provider` flag which must also be a local provider or is rejected
+- **Provider switch**: switching to a remote provider when `send_context` is still `false` silently sends only the user's question; a status bar indicator shows `[no context]` so the user knows
+- Ollama is local-only; `send_context` field is ignored and no consent notice is shown
 - Output is truncated to 4 000 chars per block before sending; full output never leaves the machine
 - Secrets redaction: strip common patterns (API keys, tokens, passwords) from output before sending — configurable regex list in config
-- `local_only` mode in config disables all remote providers at the application level
 
 ---
 
@@ -263,15 +278,19 @@ Block appearance:
 
 ## Key Technical Decision: Prompt Detection
 
-OSC 133 semantic shell integration (same standard as Warp, iTerm2, Amazon Q):
+OSC 133 semantic shell integration (same standard as Warp, iTerm2, Amazon Q).
+Hooks must **chain**, not replace, to avoid clobbering oh-my-zsh / starship / user hooks:
 
 ```bash
-# injected into ~/.zshrc by `agterm install`
-preexec() { printf '\x1b]133;C\x07'; }
-precmd()  { printf '\x1b]133;D;%s\x07' "$?"; }
+# agterm-start  (injected into ~/.zshrc by `agterm install`)
+_agterm_preexec_orig="${functions[preexec]}"
+preexec() { printf '\x1b]133;C\x07'; [[ -n "$_agterm_preexec_orig" ]] && eval "$_agterm_preexec_orig" "$@"; }
+_agterm_precmd_orig="${functions[precmd]}"
+precmd()  { printf '\x1b]133;D;%s\x07' "$?"; [[ -n "$_agterm_precmd_orig" ]] && eval "$_agterm_precmd_orig"; }
+# agterm-end
 ```
 
-`detector.go` parses these from the raw PTY byte stream without buffering full lines, so block boundaries are detected with minimal latency.
+`detector.go` parses these from the raw PTY byte stream without buffering full lines, so block boundaries are detected with minimal latency. When OSC markers are absent, falls back to regex prompt heuristic (best-effort).
 
 ---
 
@@ -288,6 +307,18 @@ precmd()  { printf '\x1b]133;D;%s\x07' "$?"; }
 
 Run all tests: `go test ./...`
 Run integration tests (requires Ollama): `go test ./... -tags integration`
+
+### Phase completion gates
+
+A phase is not done until its gate tests pass. Merging to `master` is blocked otherwise.
+
+| Phase | Required tests before merge |
+|---|---|
+| Phase 1 | PTY spawns shell, resize works, exit is clean |
+| Phase 2 | OSC parser handles split-buffer; block assembly table tests pass; hook inject + uninstall idempotency tests pass |
+| Phase 3 | Provider mock streams correctly; consent flag respected (no context sent when `send_context=false`); timeout returns error, not panic |
+| Phase 4 | All four provider adapters pass mock stream tests; env var expansion unit tests pass |
+| Phase 5 | Command suggestion confirm/reject round-trip; JSONL append + retention eviction; whitelist enforced (blacklisted command not executed) |
 
 ---
 
@@ -315,8 +346,9 @@ Run integration tests (requires Ollama): `go test ./... -tags integration`
 ## Packaging & Distribution
 
 - [ ] Cross-compile targets: `darwin/amd64`, `darwin/arm64`, `linux/amd64`, `linux/arm64`
-- [ ] GitHub Actions release workflow: tag → build matrix → upload binaries
-- [ ] Install script: `curl -fsSL https://agterm.sh/install | sh`
+- [ ] GitHub Actions release workflow: tag → build matrix → upload binaries + checksums
+- [ ] **Integrity**: each release publishes a `checksums.sha256` file signed with a project key (cosign or GPG); install script verifies checksum before executing binary
+- [ ] Install script: `curl -fsSL https://agterm.sh/install | sh` — script itself is pinned to a content hash, not a floating URL
 - [ ] Homebrew tap: `brew install olimar-agency/tap/agterm`
 - [ ] Versioning: semver, embedded in binary via `-ldflags "-X main.version=..."`
 - [ ] Release notes generated from conventional commits
