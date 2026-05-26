@@ -16,13 +16,13 @@ An open-source, agentic terminal built in Go. Inspired by Warp but model-agnosti
 
 ## Tech Stack
 
-| Layer      | Library                                    |
-|------------|--------------------------------------------|
-| TUI        | `charmbracelet/bubbletea` + `lipgloss`     |
-| PTY        | `creack/pty`                               |
-| Raw mode   | `golang.org/x/term`                        |
-| Config     | stdlib `encoding/json`                     |
-| HTTP       | stdlib `net/http`                          |
+| Layer    | Library                                |
+|----------|----------------------------------------|
+| TUI      | `charmbracelet/bubbletea` + `lipgloss` |
+| PTY      | `creack/pty`                           |
+| Raw mode | `golang.org/x/term`                    |
+| Config   | stdlib `encoding/json`                 |
+| HTTP     | stdlib `net/http`                      |
 
 ---
 
@@ -133,33 +133,62 @@ type Block struct {
 }
 ```
 
+### Config lifecycle
+
+- **Precedence** (highest → lowest): CLI flags → environment variables → config file → defaults
+- **Env var expansion**: all `api_key` values support `$VAR` syntax, expanded at load time
+- **Validation**: on startup, agterm checks that the active provider has a reachable endpoint and non-empty API key (where required); prints a clear error and exits rather than silently failing
+- **Versioning**: config file gains a `"version": 1` field; migrations run automatically on load when the version is behind
+- **Schema version**: current is `1`
+
 ---
 
 ## Development Phases
 
-### Phase 1 — PTY Shell Passthrough (current)
+### Phase 1 — PTY Shell Passthrough ✅
 
 **Goal**: working shell launched via agterm, transparent passthrough.
+
+**Done means**: `go run ./cmd/agterm` launches the user's `$SHELL`, all input/output is forwarded correctly, terminal resize works, exit via `Ctrl+D` / `exit`.
 
 - [x] Repo scaffolding, go.mod
 - [x] `cmd/agterm/main.go`: spawn shell in PTY, raw mode stdin, SIGWINCH resize
 - [x] `internal/pty/shell.go`: Shell struct (used Phase 2+)
 - [x] `internal/block/block.go`: Block struct + Store (used Phase 2+)
 - [x] `internal/ai/provider.go`: Provider interface (used Phase 3+)
-- [ ] Shell integration scripts: inject hooks into `.bashrc`/`.zshrc` that emit
-      boundary markers before/after each command so we know exactly where one
-      command ends and the next begins
+- [ ] Shell integration scripts: `agterm install` injects OSC 133 hooks into shell RC file
+
+  Shell integration details:
+  - Idempotent injection (check for existing agterm block before appending)
+  - Backs up RC file before modifying (`~/.zshrc.agterm.bak`)
+  - `agterm uninstall` cleanly removes injected lines
+  - Compatibility matrix: `zsh` (preexec/precmd), `bash` (PROMPT_COMMAND / DEBUG trap), `fish` (fish_preexec/fish_postexec)
+  - Known conflicts to warn about: oh-my-zsh overrides `preexec`; starship may interfere — emit a warning if detected, link to workaround docs
+
+---
 
 ### Phase 2 — Block Model + Bubbletea TUI
 
 **Goal**: replace raw passthrough with block-structured UI.
 
-- [ ] `internal/pty/detector.go`: parse escape sequences from shell hooks, emit `BlockStart`/`BlockEnd` events
-- [ ] `internal/block/parser.go`: accumulate output between events into Blocks
+**Done means**: every command and its output appears as a discrete styled block; exit code and duration are visible; scrolling through block history works; no raw escape sequences leak into the rendered output.
+
+- [ ] `internal/pty/detector.go`: parse OSC 133 sequences, emit `BlockStart`/`BlockEnd` events
+- [ ] `internal/block/parser.go`: accumulate PTY output between events into Blocks
 - [ ] `internal/tui/model.go`: root Bubbletea model wiring blocks + input
 - [ ] `internal/tui/blocks.go`: scrollable block list, Lipgloss styled
 - [ ] `internal/tui/input.go`: input bar with command history (up/down)
 - [ ] `internal/tui/styles.go`: theme (exit code colors, timestamps, borders)
+
+**Failure modes**:
+- OSC 133 hooks absent (user skipped `agterm install`): fall back to raw passthrough mode with a one-time prompt to run `agterm install`
+- OSC marker missing mid-session (e.g. shell plugin conflict): treat next prompt appearance as implicit block end; log to debug trace
+- Partial output on session close: flush any open block as-is with `ExitCode = -1`
+
+**Performance targets**:
+- Keystroke → echo latency: < 10 ms (PTY round-trip, no rendering overhead)
+- Startup time: < 200 ms to first prompt
+- Block history in memory: cap at 500 blocks (~50 MB worst case); evict oldest
 
 Block appearance:
 ```
@@ -168,9 +197,13 @@ Block appearance:
   def5678 scaffold phase 1
 ```
 
+---
+
 ### Phase 3 — First AI Provider
 
-**Goal**: Ctrl+A opens AI panel, context-aware responses.
+**Goal**: `Ctrl+A` opens AI panel, context-aware responses, auto-trigger on errors.
+
+**Done means**: user can ask a question, get a streaming response using the configured provider, and the response cites the relevant command block. Auto-trigger fires on non-zero exit and can be dismissed.
 
 - [ ] `internal/ai/context.go`: format last N blocks into AI prompt
 - [ ] `internal/ai/anthropic/`: Anthropic streaming adapter
@@ -178,32 +211,59 @@ Block appearance:
 - [ ] Auto-trigger on non-zero exit: "Command failed — explain?" prompt
 - [ ] Keybind: `Ctrl+A` = open AI panel, `Esc` = close
 
+**Failure modes**:
+- Provider API timeout (> 15 s): show "Request timed out — retry?" inline
+- Partial stream interrupted: display what arrived, mark response as incomplete
+- No provider configured: show setup prompt pointing to config file
+
+**Privacy / security**:
+- Before sending any command output to a remote provider, show a one-time consent notice explaining what data leaves the machine
+- Remote providers (Anthropic, OpenAI, Gemini, OpenRouter): opt-in per provider in config (`"send_context": true`)
+- Ollama is local-only; no consent notice required
+- Output is truncated to 4 000 chars per block before sending; full output never leaves the machine
+- Secrets redaction: strip common patterns (API keys, tokens, passwords) from output before sending — configurable regex list in config
+- `local_only` mode in config disables all remote providers at the application level
+
+---
+
 ### Phase 4 — Multi-Provider
 
 **Goal**: user can switch providers via config or `:provider <name>` command.
 
+**Done means**: all four provider adapters work, hot-switch changes the active provider without restart, config env vars expand correctly.
+
 - [ ] `internal/ai/ollama/`: Ollama adapter (local, free)
-- [ ] `internal/ai/openai/`: OpenAI-compatible adapter — covers OpenRouter, Groq, Together, Mistral with one implementation
+- [ ] `internal/ai/openai/`: OpenAI-compatible adapter — covers OpenRouter, Groq, Together, Mistral
 - [ ] `internal/ai/gemini/`: Google Gemini adapter
-- [ ] Provider registry + hot-switch
-- [ ] Config loader with env var expansion (`$ANTHROPIC_API_KEY`)
+- [ ] Provider registry + hot-switch (`:provider ollama`)
+- [ ] Config loader: env var expansion, validation, version migration
+
+**Failure modes**:
+- Unknown provider name in config: print actionable error listing valid names
+- API key missing for remote provider: prompt user to set env var or update config
+- Ollama not running: surface "Ollama is not reachable at `<url>`" with start instructions
+
+---
 
 ### Phase 5 — Agentic Features
 
-**Goal**: AI can propose and execute multi-step tasks.
+**Goal**: AI can propose and execute multi-step tasks with explicit user confirmation at each step.
 
-- [ ] AI suggests a command → shown in input bar → user confirms with Enter
+**Done means**: user describes a task in natural language, AI proposes a command sequence, user confirms step-by-step, commands execute and results feed back into AI context.
+
+- [ ] AI suggests a command → shown in input bar highlighted → user confirms with Enter or rejects with Esc
 - [ ] Multi-step tasks: "set up a Go project here" → AI runs a sequence
-- [ ] Persistent block history across sessions (SQLite or JSONL)
-- [ ] Safe read-only tool use: AI can autonomously run `ls`, `cat`, `git log`
-- [ ] Integration hook: dispatch long-running tasks to the `control` cloud plane
+- [ ] Persistent block history across sessions — **decision: JSONL** (simpler than SQLite for append-only log; switch to SQLite if search/query features are needed)
+  - Retention policy: keep last 30 days or 10 000 blocks, whichever comes first
+  - Schema: one JSON object per line `{ "v":1, "block": {...} }`
+- [ ] Safe read-only tool use: AI autonomously runs `ls`, `cat`, `git log` (whitelist enforced, not regex)
+- [ ] Integration hook: dispatch long-running tasks to the `control` cloud plane via HTTP
 
 ---
 
 ## Key Technical Decision: Prompt Detection
 
-The shell needs to emit markers so agterm knows when a command starts and ends.
-Shell integration scripts (same approach as Warp, iTerm2, Amazon Q):
+OSC 133 semantic shell integration (same standard as Warp, iTerm2, Amazon Q):
 
 ```bash
 # injected into ~/.zshrc by `agterm install`
@@ -211,8 +271,55 @@ preexec() { printf '\x1b]133;C\x07'; }
 precmd()  { printf '\x1b]133;D;%s\x07' "$?"; }
 ```
 
-These OSC 133 sequences are the de-facto standard for semantic shell integration.
-`detector.go` parses them from the PTY output stream to emit block boundaries.
+`detector.go` parses these from the raw PTY byte stream without buffering full lines, so block boundaries are detected with minimal latency.
+
+---
+
+## Testing Strategy
+
+| Area | Approach |
+|---|---|
+| OSC 133 parsing | Unit tests with synthetic byte sequences including split-buffer edge cases |
+| Block assembly | Table-driven tests: input PTY stream → expected Block slice |
+| Config load/expand | Unit tests for env expansion, migration, validation errors |
+| Provider streaming | Interface-level mocks; integration tests against Ollama (CI optional) |
+| Shell hooks | Script tests: inject into temp RC file, verify idempotency and uninstall |
+| TUI rendering | Snapshot tests via `bubbletea/teatest` |
+
+Run all tests: `go test ./...`
+Run integration tests (requires Ollama): `go test ./... -tags integration`
+
+---
+
+## Observability & Debug
+
+- `AGTERM_LOG=debug agterm` enables structured log output to `~/.config/agterm/debug.log`
+- Logs are redacted with the same secrets patterns used before AI context is sent
+- `agterm diag` prints a reproducible diagnostics bundle (OS, shell, Go version, config minus secrets, last 20 log lines) for bug reports
+- Log levels: `debug`, `info`, `warn`, `error`
+
+---
+
+## Performance Targets
+
+| Metric | Target |
+|---|---|
+| Keystroke → echo latency | < 10 ms |
+| Startup to first prompt | < 200 ms |
+| Block history (memory) | ≤ 500 blocks in memory |
+| AI first token (remote) | < 2 s (network-dependent, surfaced as a loading indicator) |
+| Binary size | < 20 MB |
+
+---
+
+## Packaging & Distribution
+
+- [ ] Cross-compile targets: `darwin/amd64`, `darwin/arm64`, `linux/amd64`, `linux/arm64`
+- [ ] GitHub Actions release workflow: tag → build matrix → upload binaries
+- [ ] Install script: `curl -fsSL https://agterm.sh/install | sh`
+- [ ] Homebrew tap: `brew install olimar-agency/tap/agterm`
+- [ ] Versioning: semver, embedded in binary via `-ldflags "-X main.version=..."`
+- [ ] Release notes generated from conventional commits
 
 ---
 
@@ -226,3 +333,4 @@ These OSC 133 sequences are the de-facto standard for semantic shell integration
 | Distribution | macOS/Linux app | Single Go binary, works over SSH |
 | Account required | Yes | No |
 | Build time | ~5 min (Rust, 60+ crates) | Seconds (Go) |
+| Data privacy | Output sent to Warp servers | Local-only mode available |
