@@ -1,0 +1,4 @@
+agterm
+*.exe
+.env
+.DS_Store
