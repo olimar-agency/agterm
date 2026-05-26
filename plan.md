@@ -167,7 +167,7 @@ type Block struct {
   - Backs up RC file before modifying (`~/.zshrc.agterm.bak`)
   - `agterm install --dry-run` prints what would be written without touching files
   - `agterm uninstall` cleanly removes lines between sentinels
-  - **Hook strategy — always use `add-zsh-hook` for zsh** (safe with oh-my-zsh, prezto, any plugin manager):
+  - **Hook strategy — always use `add-zsh-hook` for zsh** (generally compatible with common plugin managers; tested with oh-my-zsh and prezto; see known conflicts below):
     ```bash
     # agterm-start
     autoload -Uz add-zsh-hook
@@ -283,7 +283,7 @@ Block appearance:
 ## Key Technical Decision: Prompt Detection
 
 OSC 133 semantic shell integration (same standard as Warp, iTerm2, Amazon Q).
-Uses `add-zsh-hook` for zsh — safe with all plugin managers, no `eval` of stored function bodies:
+Uses `add-zsh-hook` for zsh — generally compatible with common plugin managers (oh-my-zsh, prezto), no `eval` of stored function bodies:
 
 ```bash
 # agterm-start  (injected into ~/.zshrc by `agterm install`)
@@ -356,8 +356,23 @@ A phase is not done until its gate tests pass. Merging to the default branch (`m
 - [ ] Install script (convenience): `curl -fsSL https://agterm.sh/install | sh` — this is a floating URL for discoverability only; security-conscious users should use the checksum-verified flow:
   ```sh
   VERSION=v0.1.0  # pin to a release tag
-  curl -fsSL "https://github.com/olimar-agency/agterm/releases/download/${VERSION}/install.sh" -o install.sh
-  curl -fsSL "https://github.com/olimar-agency/agterm/releases/download/${VERSION}/checksums.sha256" | grep install.sh | sha256sum --check
+  BASE="https://github.com/olimar-agency/agterm/releases/download/${VERSION}"
+
+  # 1. download artifacts
+  curl -fsSL "${BASE}/install.sh"          -o install.sh
+  curl -fsSL "${BASE}/checksums.sha256"    -o checksums.sha256
+  curl -fsSL "${BASE}/checksums.sha256.sig" -o checksums.sha256.sig
+
+  # 2. verify the checksum file's signature before trusting it (requires cosign)
+  cosign verify-blob \
+    --key https://agterm.sh/cosign.pub \
+    --signature checksums.sha256.sig \
+    checksums.sha256
+
+  # 3. verify the installer hash (cross-platform: shasum on macOS, sha256sum on Linux)
+  grep "install.sh" checksums.sha256 | \
+    (command -v sha256sum >/dev/null && sha256sum -c || shasum -a 256 -c)
+
   sh install.sh
   ```
 - [ ] Homebrew tap: `brew install olimar-agency/tap/agterm`
