@@ -12,7 +12,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/imattos78/agterm/internal/ai"
-	"github.com/imattos78/agterm/internal/ai/anthropic"
+	_ "github.com/imattos78/agterm/internal/ai/anthropic"
+	_ "github.com/imattos78/agterm/internal/ai/gemini"
+	_ "github.com/imattos78/agterm/internal/ai/ollama"
+	_ "github.com/imattos78/agterm/internal/ai/openai"
 	"github.com/imattos78/agterm/internal/block"
 	"github.com/imattos78/agterm/internal/config"
 	ptyPkg "github.com/imattos78/agterm/internal/pty"
@@ -108,14 +111,28 @@ func buildProvider(cfg config.Config) (ai.Provider, bool) {
 	if !ok {
 		return nil, false
 	}
-	switch name {
-	case "anthropic":
-		if pcfg.APIKey == "" {
-			return nil, false
-		}
-		return anthropic.New(pcfg), pcfg.SendContext
+	p, err := ai.Build(name, pcfg.APIKey, pcfg.BaseURL, pcfg.Model)
+	if err != nil {
+		return nil, false
 	}
-	return nil, false
+	return p, pcfg.SendContext
+}
+
+// switchProvider changes the active provider at runtime without restarting.
+// It returns an error string suitable for display, or "" on success.
+func (m *Model) switchProvider(name string) string {
+	cfg, err := config.Load()
+	if err != nil {
+		return "could not reload config: " + err.Error()
+	}
+	pcfg := cfg.Providers[name]
+	p, err := ai.Build(name, pcfg.APIKey, pcfg.BaseURL, pcfg.Model)
+	if err != nil {
+		return err.Error()
+	}
+	m.provider = p
+	m.sendContext = pcfg.SendContext
+	return ""
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -302,6 +319,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyEnter:
 			cmd := strings.TrimSpace(m.input.Value())
 			if cmd != "" {
+				// :provider <name> — hot-switch AI provider without restart
+				if strings.HasPrefix(cmd, ":provider ") {
+					name := strings.TrimSpace(strings.TrimPrefix(cmd, ":provider "))
+					m.input.SetValue("")
+					if errStr := m.switchProvider(name); errStr != "" {
+						m.aiOpen = true
+						m.aiError = errStr
+						m.aiResponse = ""
+						m.input.Blur()
+						m.aiInput.Focus()
+					} else {
+						m.aiOpen = true
+						m.aiResponse = fmt.Sprintf("Switched to provider: %s", name)
+						m.aiError = ""
+						m.input.Blur()
+						m.aiInput.Focus()
+					}
+					break
+				}
 				wd, _ := os.Getwd()
 				m.parser.StartBlock(cmd, wd)
 				m.running = true

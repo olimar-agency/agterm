@@ -247,17 +247,17 @@ Block appearance:
 
 ---
 
-### Phase 4 — Multi-Provider
+### Phase 4 — Multi-Provider ✅
 
 **Goal**: user can switch providers via config or `:provider <name>` command.
 
 **Done means**: all four provider adapters work, hot-switch changes the active provider without restart, config env vars expand correctly.
 
-- [ ] `internal/ai/ollama/`: Ollama adapter (local, free)
-- [ ] `internal/ai/openai/`: OpenAI-compatible adapter — covers OpenRouter, Groq, Together, Mistral
-- [ ] `internal/ai/gemini/`: Google Gemini adapter
-- [ ] Provider registry + hot-switch (`:provider ollama`)
-- [ ] Config loader: env var expansion, validation, version migration
+- [x] `internal/ai/ollama/`: Ollama adapter (local, free)
+- [x] `internal/ai/openai/`: OpenAI-compatible adapter — covers OpenRouter, Groq, Together, Mistral
+- [x] `internal/ai/gemini/`: Google Gemini adapter
+- [x] Provider registry + hot-switch (`:provider ollama`)
+- [x] Config loader: env var expansion, validation, version migration
 
 **Failure modes**:
 - Unknown provider name in config: print actionable error listing valid names

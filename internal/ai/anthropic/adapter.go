@@ -13,6 +13,12 @@ import (
 	"github.com/imattos78/agterm/internal/config"
 )
 
+func init() {
+	ai.Register("anthropic", func(apiKey, baseURL, model string) ai.Provider {
+		return New(config.ProviderConfig{APIKey: apiKey, BaseURL: baseURL, Model: model})
+	})
+}
+
 const (
 	apiURL       = "https://api.anthropic.com/v1/messages"
 	apiVersion   = "2023-06-01"
