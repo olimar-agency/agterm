@@ -142,7 +142,7 @@ type Block struct {
 - **Precedence** (highest → lowest): CLI flags → environment variables → config file → defaults
 - **Env var expansion**: all `api_key` values support `$VAR` syntax, expanded at load time
 - **Validation**: on startup, agterm validates config structure and logs warnings for missing/invalid AI settings — **the shell always starts regardless**; AI features show an inline error state rather than blocking the terminal
-- **Versioning**: `"version"` field is written by agterm on first config save; if absent, loader assumes `version=0` and migrates forward automatically; migrations run on load, never on read-only operations
+- **Versioning**: `"version"` field is written by agterm on first config save; if absent, loader assumes `version=0` and computes required migrations in memory. Migration detection (reading version, computing diff) happens on every load. The config file is only rewritten on an explicit write operation — `agterm migrate` command or saving a config change. A read-only startup (just launching the shell) never modifies the config file.
 - **Schema version**: current is `1`; `--dry-run` on `agterm install` / `agterm migrate` shows pending changes without modifying files
 
 ---
@@ -167,17 +167,21 @@ type Block struct {
   - Backs up RC file before modifying (`~/.zshrc.agterm.bak`)
   - `agterm install --dry-run` prints what would be written without touching files
   - `agterm uninstall` cleanly removes lines between sentinels
-  - **Hook chaining** — hooks must wrap, not replace:
+  - **Hook strategy — always use `add-zsh-hook` for zsh** (safe with oh-my-zsh, prezto, any plugin manager):
     ```bash
     # agterm-start
-    _agterm_preexec_orig="${functions[preexec]}"
-    preexec() { printf '\x1b]133;C\x07'; [[ -n "$_agterm_preexec_orig" ]] && eval "$_agterm_preexec_orig" "$@"; }
-    _agterm_precmd_orig="${functions[precmd]}"
-    precmd()  { printf '\x1b]133;D;%s\x07' "$?"; [[ -n "$_agterm_precmd_orig" ]] && eval "$_agterm_precmd_orig"; }
+    autoload -Uz add-zsh-hook
+    _agterm_preexec() { printf '\x1b]133;C\x07'; }
+    _agterm_precmd()  { printf '\x1b]133;D;%s\x07' "$?"; }
+    add-zsh-hook preexec _agterm_preexec
+    add-zsh-hook precmd  _agterm_precmd
     # agterm-end
     ```
-  - Compatibility matrix: `zsh` (preexec/precmd chaining above), `bash` (append to PROMPT_COMMAND; use DEBUG trap for preexec), `fish` (fish_preexec/fish_postexec — additive by design)
-  - Known conflicts: oh-my-zsh defines its own hook arrays — detect and use `add-zsh-hook` instead of direct assignment; starship resets precmd — emit a warning if detected, link to workaround docs
+  - Compatibility matrix:
+    - `zsh`: `add-zsh-hook` (above) — works with oh-my-zsh, prezto, starship; truly additive
+    - `bash`: append to `PROMPT_COMMAND`; use `trap DEBUG` for preexec equivalent
+    - `fish`: `--on-event fish_preexec` / `fish_postexec` — additive by design, no special handling needed
+  - Known conflicts: starship resets `precmd` hooks on some versions — detect starship in `$PATH` and emit a warning with link to workaround docs
 
 ---
 
@@ -279,14 +283,15 @@ Block appearance:
 ## Key Technical Decision: Prompt Detection
 
 OSC 133 semantic shell integration (same standard as Warp, iTerm2, Amazon Q).
-Hooks must **chain**, not replace, to avoid clobbering oh-my-zsh / starship / user hooks:
+Uses `add-zsh-hook` for zsh — safe with all plugin managers, no `eval` of stored function bodies:
 
 ```bash
 # agterm-start  (injected into ~/.zshrc by `agterm install`)
-_agterm_preexec_orig="${functions[preexec]}"
-preexec() { printf '\x1b]133;C\x07'; [[ -n "$_agterm_preexec_orig" ]] && eval "$_agterm_preexec_orig" "$@"; }
-_agterm_precmd_orig="${functions[precmd]}"
-precmd()  { printf '\x1b]133;D;%s\x07' "$?"; [[ -n "$_agterm_precmd_orig" ]] && eval "$_agterm_precmd_orig"; }
+autoload -Uz add-zsh-hook
+_agterm_preexec() { printf '\x1b]133;C\x07'; }
+_agterm_precmd()  { printf '\x1b]133;D;%s\x07' "$?"; }
+add-zsh-hook preexec _agterm_preexec
+add-zsh-hook precmd  _agterm_precmd
 # agterm-end
 ```
 
@@ -310,7 +315,7 @@ Run integration tests (requires Ollama): `go test ./... -tags integration`
 
 ### Phase completion gates
 
-A phase is not done until its gate tests pass. Merging to `master` is blocked otherwise.
+A phase is not done until its gate tests pass. Merging to the default branch (`master` today — update this note if the repo is renamed to `main`) is blocked otherwise.
 
 | Phase | Required tests before merge |
 |---|---|
@@ -348,7 +353,13 @@ A phase is not done until its gate tests pass. Merging to `master` is blocked ot
 - [ ] Cross-compile targets: `darwin/amd64`, `darwin/arm64`, `linux/amd64`, `linux/arm64`
 - [ ] GitHub Actions release workflow: tag → build matrix → upload binaries + checksums
 - [ ] **Integrity**: each release publishes a `checksums.sha256` file signed with a project key (cosign or GPG); install script verifies checksum before executing binary
-- [ ] Install script: `curl -fsSL https://agterm.sh/install | sh` — script itself is pinned to a content hash, not a floating URL
+- [ ] Install script (convenience): `curl -fsSL https://agterm.sh/install | sh` — this is a floating URL for discoverability only; security-conscious users should use the checksum-verified flow:
+  ```sh
+  VERSION=v0.1.0  # pin to a release tag
+  curl -fsSL "https://github.com/olimar-agency/agterm/releases/download/${VERSION}/install.sh" -o install.sh
+  curl -fsSL "https://github.com/olimar-agency/agterm/releases/download/${VERSION}/checksums.sha256" | grep install.sh | sha256sum --check
+  sh install.sh
+  ```
 - [ ] Homebrew tap: `brew install olimar-agency/tap/agterm`
 - [ ] Versioning: semver, embedded in binary via `-ldflags "-X main.version=..."`
 - [ ] Release notes generated from conventional commits
