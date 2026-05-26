@@ -218,17 +218,18 @@ Block appearance:
 
 ---
 
-### Phase 3 — First AI Provider
+### Phase 3 — First AI Provider ✅
 
 **Goal**: `Ctrl+A` opens AI panel, context-aware responses, auto-trigger on errors.
 
 **Done means**: user can ask a question, get a streaming response using the configured provider, and the response cites the relevant command block. Auto-trigger fires on non-zero exit and can be dismissed.
 
-- [ ] `internal/ai/context.go`: format last N blocks into AI prompt
-- [ ] `internal/ai/anthropic/`: Anthropic streaming adapter
-- [ ] `internal/tui/ai_panel.go`: streaming response panel (side or bottom)
-- [ ] Auto-trigger on non-zero exit: "Command failed — explain?" prompt
-- [ ] Keybind: `Ctrl+A` = open AI panel, `Esc` = close
+- [x] `internal/ai/context.go`: `BuildContext` (last N blocks, 4000-char truncation) + `SystemPrompt`
+- [x] `internal/ai/anthropic/adapter.go`: HTTP SSE streaming adapter via stdlib `net/http`
+- [x] `internal/ai/provider.go`: updated to `Stream() <-chan StreamResult` — provider owns channel lifecycle
+- [x] `internal/config/config.go`: `Load()` with env var expansion, version normalisation, `SendContext` field
+- [x] `internal/tui/model.go`: AI panel state, `Ctrl+A` / `Esc`, auto-trigger on non-zero exit, streaming via `readNextAI` cmd, `[no context]` / `[context: N blocks]` status
+- [x] Tests: config (6), context (6), anthropic adapter (3) — 15 new, 32 total passing
 
 **Failure modes**:
 - Provider API timeout (> 15 s): show "Request timed out — retry?" inline

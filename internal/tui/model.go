@@ -1,40 +1,62 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/imattos78/agterm/internal/ai"
+	"github.com/imattos78/agterm/internal/ai/anthropic"
 	"github.com/imattos78/agterm/internal/block"
+	"github.com/imattos78/agterm/internal/config"
 	ptyPkg "github.com/imattos78/agterm/internal/pty"
 )
 
-// ptyMsg carries ordered segments from one PTY read.
+// ── tea messages ─────────────────────────────────────────────────────────────
+
 type ptyMsg struct{ segs []ptyPkg.Segment }
-
-// errMsg signals a fatal PTY error.
 type errMsg struct{ err error }
+type aiChunkMsg ai.StreamResult
 
-// Model is the root Bubbletea model for agterm.
+// ── Model ─────────────────────────────────────────────────────────────────────
+
 type Model struct {
+	// shell
 	shell    *ptyPkg.Shell
 	detector *ptyPkg.Detector
 	parser   *block.Parser
 	store    *block.Store
 
+	// terminal input
 	input   textinput.Model
-	running bool // true while a command is executing in the PTY
+	running bool
 
+	// AI panel
+	provider    ai.Provider
+	sendContext bool
+	aiOpen      bool
+	aiInput     textinput.Model
+	aiResponse  string
+	aiStreaming bool
+	aiError     string
+	aiCh        <-chan ai.StreamResult
+	aiCancel    context.CancelFunc
+
+	// layout
 	width  int
 	height int
 	err    error
 }
 
-// New constructs a Model, spawning the user's $SHELL.
+const aiPanelHeight = 12 // lines reserved for AI panel when open
+
+// New constructs the Model, loading config and wiring the AI provider.
 func New() (Model, error) {
 	sh, err := ptyPkg.New("")
 	if err != nil {
@@ -42,29 +64,68 @@ func New() (Model, error) {
 	}
 
 	store := block.NewStore(500)
-	parser := block.NewParser(store)
 
-	input := textinput.New()
-	input.Placeholder = "type a command…"
-	input.Focus()
-	input.CharLimit = 1024
-	input.PromptStyle = promptStyle
-	input.Prompt = "❯ "
+	// command input
+	cmdInput := textinput.New()
+	cmdInput.Placeholder = "type a command…"
+	cmdInput.Focus()
+	cmdInput.CharLimit = 1024
+	cmdInput.PromptStyle = promptStyle
+	cmdInput.Prompt = "❯ "
 
-	return Model{
+	// AI question input
+	aiIn := textinput.New()
+	aiIn.Placeholder = "ask AI…"
+	aiIn.CharLimit = 512
+	aiIn.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Bold(true)
+	aiIn.Prompt = "AI ❯ "
+
+	m := Model{
 		shell:    sh,
 		detector: &ptyPkg.Detector{},
-		parser:   parser,
+		parser:   block.NewParser(store),
 		store:    store,
-		input:    input,
-	}, nil
+		input:    cmdInput,
+		aiInput:  aiIn,
+	}
+
+	// load config and wire provider (non-fatal if config missing or provider unavailable)
+	cfg, err := config.Load()
+	if err == nil {
+		m.provider, m.sendContext = buildProvider(cfg)
+	}
+
+	return m, nil
 }
+
+// buildProvider returns the configured Provider and sendContext flag.
+// Returns nil provider if the active provider can't be initialised.
+func buildProvider(cfg config.Config) (ai.Provider, bool) {
+	if cfg.LocalOnly {
+		return nil, false
+	}
+	name, pcfg, ok := cfg.ActiveProvider()
+	if !ok {
+		return nil, false
+	}
+	switch name {
+	case "anthropic":
+		if pcfg.APIKey == "" {
+			return nil, false
+		}
+		return anthropic.New(pcfg), pcfg.SendContext
+	}
+	return nil, false
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
 
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(textinput.Blink, m.readPTY())
 }
 
-// readPTY blocks on one PTY read and returns a ptyMsg.
+// ── PTY read ──────────────────────────────────────────────────────────────────
+
 func (m Model) readPTY() tea.Cmd {
 	return func() tea.Msg {
 		buf := make([]byte, 4096)
@@ -76,6 +137,46 @@ func (m Model) readPTY() tea.Cmd {
 	}
 }
 
+// ── AI streaming ──────────────────────────────────────────────────────────────
+
+func readNextAI(ch <-chan ai.StreamResult) tea.Cmd {
+	return func() tea.Msg {
+		return aiChunkMsg(<-ch)
+	}
+}
+
+func (m *Model) startStream(question string) tea.Cmd {
+	if m.provider == nil {
+		m.aiError = "No AI provider configured — add one to ~/.config/agterm/config.json"
+		m.aiStreaming = false
+		return nil
+	}
+
+	m.aiStreaming = true
+	m.aiResponse = ""
+	m.aiError = ""
+
+	var ctx string
+	if m.sendContext {
+		ctx = ai.BuildContext(m.store, 10)
+	}
+
+	req := ai.Request{
+		System: ai.SystemPrompt,
+		Messages: []ai.Message{
+			{Role: ai.RoleUser, Content: ai.BuildQuestion(ctx, question)},
+		},
+	}
+
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+	m.aiCh = m.provider.Stream(cancelCtx, req)
+	m.aiCancel = cancel
+	return readNextAI(m.aiCh)
+}
+
+// ── Update ────────────────────────────────────────────────────────────────────
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -85,16 +186,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.input.Width = msg.Width - 4
+		m.aiInput.Width = msg.Width - 8
 		m.shell.Resize(uint16(msg.Height), uint16(msg.Width))
 
 	case ptyMsg:
 		m.parser.Feed(msg.segs)
-		// detect block completion
 		if m.running && m.parser.Active() == nil {
 			m.running = false
-			m.input.Focus()
+			if !m.aiOpen {
+				m.input.Focus()
+			}
+			// auto-trigger AI on non-zero exit
+			blocks := m.store.All()
+			if len(blocks) > 0 {
+				last := blocks[len(blocks)-1]
+				if last.ExitCode != 0 && m.provider != nil && !m.aiOpen {
+					m.aiOpen = true
+					m.input.Blur()
+					m.aiInput.Focus()
+					m.aiInput.SetValue(fmt.Sprintf("'%s' failed (exit %d) — what went wrong?", last.Command, last.ExitCode))
+				}
+			}
 		}
 		cmds = append(cmds, m.readPTY())
+
+	case aiChunkMsg:
+		r := ai.StreamResult(msg)
+		if r.Done {
+			m.aiStreaming = false
+			m.aiCh = nil
+			if r.Err != nil {
+				m.aiError = r.Err.Error()
+			}
+			if m.aiCancel != nil {
+				m.aiCancel()
+				m.aiCancel = nil
+			}
+		} else {
+			m.aiResponse += r.Text
+			if m.aiCh != nil {
+				cmds = append(cmds, readNextAI(m.aiCh))
+			}
+		}
 
 	case errMsg:
 		m.err = msg.err
@@ -102,81 +235,188 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if m.running {
-			// pass all keys directly to PTY while a command is running
 			if b := keyBytes(msg); b != nil {
 				m.shell.Write(b) //nolint:errcheck
 			}
-		} else {
+			break
+		}
+
+		if m.aiOpen {
 			switch msg.Type {
+			case tea.KeyEsc:
+				// close panel; cancel any in-progress stream
+				if m.aiCancel != nil {
+					m.aiCancel()
+					m.aiCancel = nil
+				}
+				m.aiOpen = false
+				m.aiStreaming = false
+				m.aiResponse = ""
+				m.aiError = ""
+				m.aiInput.SetValue("")
+				m.aiInput.Blur()
+				m.input.Focus()
+
+			case tea.KeyEnter:
+				if !m.aiStreaming {
+					q := strings.TrimSpace(m.aiInput.Value())
+					if q != "" {
+						m.aiInput.SetValue("")
+						cmd := m.startStream(q)
+						if cmd != nil {
+							cmds = append(cmds, cmd)
+						}
+					}
+				}
+
 			case tea.KeyCtrlC, tea.KeyCtrlD:
 				m.parser.Flush()
 				m.shell.Close()
 				return m, tea.Quit
 
-			case tea.KeyEnter:
-				cmd := strings.TrimSpace(m.input.Value())
-				if cmd != "" {
-					wd, _ := os.Getwd()
-					m.parser.StartBlock(cmd, wd)
-					m.running = true
-					m.shell.Write([]byte(cmd + "\r")) //nolint:errcheck
-					m.input.SetValue("")
-				}
-
 			default:
-				var tiCmd tea.Cmd
-				m.input, tiCmd = m.input.Update(msg)
-				cmds = append(cmds, tiCmd)
+				if !m.aiStreaming {
+					var tiCmd tea.Cmd
+					m.aiInput, tiCmd = m.aiInput.Update(msg)
+					cmds = append(cmds, tiCmd)
+				}
 			}
+			break
+		}
+
+		// AI panel closed — command input active
+		switch msg.Type {
+		case tea.KeyCtrlA:
+			m.aiOpen = true
+			m.aiResponse = ""
+			m.aiError = ""
+			m.aiInput.SetValue("")
+			m.input.Blur()
+			m.aiInput.Focus()
+
+		case tea.KeyCtrlC, tea.KeyCtrlD:
+			m.parser.Flush()
+			m.shell.Close()
+			return m, tea.Quit
+
+		case tea.KeyEnter:
+			cmd := strings.TrimSpace(m.input.Value())
+			if cmd != "" {
+				wd, _ := os.Getwd()
+				m.parser.StartBlock(cmd, wd)
+				m.running = true
+				m.shell.Write([]byte(cmd + "\r")) //nolint:errcheck
+				m.input.SetValue("")
+			}
+
+		default:
+			var tiCmd tea.Cmd
+			m.input, tiCmd = m.input.Update(msg)
+			cmds = append(cmds, tiCmd)
 		}
 	}
 
 	return m, tea.Batch(cmds...)
 }
 
+// ── View ──────────────────────────────────────────────────────────────────────
+
 func (m Model) View() string {
 	if m.err != nil {
-		return errorStyle.Render("agterm error: "+m.err.Error()) + "\n"
+		return errorStyle.Render("agterm: "+m.err.Error()) + "\n"
 	}
 	if m.width == 0 || m.height == 0 {
 		return ""
 	}
 
-	// bottom bar: 1 line for input / status
-	contentLines := m.height - 1
+	// allocate vertical space
+	bottomBarH := 1
+	panelH := 0
+	if m.aiOpen {
+		panelH = aiPanelHeight
+	}
+	blockH := m.height - bottomBarH - panelH
+	if blockH < 1 {
+		blockH = 1
+	}
 
-	// render all completed blocks
+	// ── block list ────────────────────────────────────────────────────────────
 	var lines []string
 	for _, b := range m.store.All() {
 		lines = append(lines, blockLines(b, m.width)...)
 	}
-	// render the active (running) block
 	if active := m.parser.Active(); active != nil {
 		lines = append(lines, activeLines(active, m.width)...)
 	}
-
-	// keep only the last contentLines lines so we don't overflow the screen
-	if len(lines) > contentLines {
-		lines = lines[len(lines)-contentLines:]
+	if len(lines) > blockH {
+		lines = lines[len(lines)-blockH:]
 	}
-	// pad top with blank lines so the content stays pinned to the bottom
-	for len(lines) < contentLines {
+	for len(lines) < blockH {
 		lines = append([]string{""}, lines...)
 	}
-
 	content := strings.Join(lines, "\n")
 
+	// ── AI panel ──────────────────────────────────────────────────────────────
+	var panel string
+	if m.aiOpen {
+		panel = m.renderAIPanel()
+	}
+
+	// ── bottom bar ────────────────────────────────────────────────────────────
 	var bar string
-	if m.running {
+	if m.aiOpen {
+		bar = m.aiInput.View()
+	} else if m.running {
 		bar = statusStyle.Render("running…")
 	} else {
 		bar = m.input.View()
 	}
 
-	return content + "\n" + bar
+	parts := []string{content}
+	if panel != "" {
+		parts = append(parts, panel)
+	}
+	parts = append(parts, bar)
+	return strings.Join(parts, "\n")
 }
 
-// blockLines renders a completed Block into display lines.
+func (m Model) renderAIPanel() string {
+	divider := dimStyle.Render(strings.Repeat("─", m.width))
+
+	// context status
+	var status string
+	if m.aiStreaming {
+		status = statusStyle.Render("streaming…")
+	} else if m.aiError != "" {
+		status = errorStyle.Render("error: " + m.aiError)
+	} else if m.sendContext {
+		status = dimStyle.Render(fmt.Sprintf("[context: %d blocks]", len(m.store.All())))
+	} else {
+		status = dimStyle.Render("[no context — set send_context: true in config to enable]")
+	}
+
+	// response area (panelHeight - 3: divider + status + input bar)
+	responseH := aiPanelHeight - 3
+	if responseH < 1 {
+		responseH = 1
+	}
+	var respLines []string
+	if m.aiResponse != "" {
+		respLines = strings.Split(m.aiResponse, "\n")
+	}
+	if len(respLines) > responseH {
+		respLines = respLines[len(respLines)-responseH:]
+	}
+	for len(respLines) < responseH {
+		respLines = append([]string{""}, respLines...)
+	}
+	response := strings.Join(respLines, "\n")
+
+	return strings.Join([]string{divider, response, status}, "\n")
+}
+
+// ── block rendering ───────────────────────────────────────────────────────────
+
 func blockLines(b *block.Block, width int) []string {
 	exit := exitCodeStyle(b.ExitCode).Render(fmt.Sprintf("[%d]", b.ExitCode))
 	dur := dimStyle.Render(fmt.Sprintf("%.1fs", b.Duration.Seconds()))
@@ -193,23 +433,20 @@ func blockLines(b *block.Block, width int) []string {
 		return []string{header}
 	}
 	out := strings.TrimRight(b.Output, "\n")
-	outputLines := strings.Split(outputStyle.Render(out), "\n")
-	return append([]string{header}, outputLines...)
+	return append([]string{header}, strings.Split(outputStyle.Render(out), "\n")...)
 }
 
-// activeLines renders the in-progress block.
-func activeLines(b *block.Block, width int) []string {
+func activeLines(b *block.Block, _ int) []string {
 	header := promptStyle.Render("❯ ") + cmdStyle.Render(b.Command) + " " + dimStyle.Render("…")
-	_ = width
 	if b.Output == "" {
 		return []string{header}
 	}
 	out := strings.TrimRight(b.Output, "\n")
-	outputLines := strings.Split(outputStyle.Render(out), "\n")
-	return append([]string{header}, outputLines...)
+	return append([]string{header}, strings.Split(outputStyle.Render(out), "\n")...)
 }
 
-// keyBytes translates a Bubbletea key message into the bytes the PTY expects.
+// ── key translation ───────────────────────────────────────────────────────────
+
 func keyBytes(msg tea.KeyMsg) []byte {
 	switch msg.Type {
 	case tea.KeyRunes:
