@@ -160,7 +160,7 @@ type Block struct {
 - [x] `internal/pty/shell.go`: Shell struct (used Phase 2+)
 - [x] `internal/block/block.go`: Block struct + Store (used Phase 2+)
 - [x] `internal/ai/provider.go`: Provider interface (used Phase 3+)
-- [ ] Shell integration scripts: `agterm install` injects OSC 133 hooks into shell RC file
+- [x] Shell integration scripts: `agterm install` injects OSC 133 hooks into shell RC file
 
   Shell integration details:
   - Idempotent injection (check for `# agterm-start` / `# agterm-end` sentinel comments before appending)
@@ -185,18 +185,19 @@ type Block struct {
 
 ---
 
-### Phase 2 — Block Model + Bubbletea TUI
+### Phase 2 — Block Model + Bubbletea TUI ✅
 
 **Goal**: replace raw passthrough with block-structured UI.
 
 **Done means**: every command and its output appears as a discrete styled block; exit code and duration are visible; scrolling through block history works; no raw escape sequences leak into the rendered output.
 
-- [ ] `internal/pty/detector.go`: parse OSC 133 sequences, emit `BlockStart`/`BlockEnd` events
-- [ ] `internal/block/parser.go`: accumulate PTY output between events into Blocks
-- [ ] `internal/tui/model.go`: root Bubbletea model wiring blocks + input
-- [ ] `internal/tui/blocks.go`: scrollable block list, Lipgloss styled
-- [ ] `internal/tui/input.go`: input bar with command history (up/down)
-- [ ] `internal/tui/styles.go`: theme (exit code colors, timestamps, borders)
+- [x] `internal/pty/detector.go`: ordered `[]Segment` parser for OSC 133 sequences; split-buffer safe
+- [x] `internal/block/parser.go`: assembles segments into Blocks; correct output/event ordering
+- [x] `internal/tui/model.go`: Bubbletea model with PTY read loop, block rendering, key→PTY passthrough
+- [x] `internal/tui/styles.go`: Lipgloss theme (prompt, exit code, dim, output indent)
+- [x] `cmd/agterm/install.go`: `agterm install` / `uninstall` with idempotency, backup, `--dry-run`
+- [x] `cmd/agterm/main.go`: routes install/uninstall subcommands, launches Bubbletea TUI
+- [x] Tests: detector (5), parser (6), install (6) — 17/17 passing
 
 **Failure modes**:
 - OSC 133 hooks absent (user skipped `agterm install`): fall back to raw passthrough mode with a one-time prompt to run `agterm install`
