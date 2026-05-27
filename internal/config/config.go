@@ -16,10 +16,18 @@ type ProviderConfig struct {
 }
 
 type Config struct {
-	Version   int                       `json:"version"`
-	Provider  string                    `json:"provider"`
-	LocalOnly bool                      `json:"local_only"` // disables all remote providers
-	Providers map[string]ProviderConfig `json:"providers"`
+	Version         int                       `json:"version"`
+	Provider        string                    `json:"provider"`
+	LocalOnly       bool                      `json:"local_only"`        // disables all remote providers
+	AutoRunReadonly bool                       `json:"auto_run_readonly"` // auto-execute whitelisted read-only suggestions
+	Control         ControlConfig             `json:"control"`
+	Providers       map[string]ProviderConfig `json:"providers"`
+}
+
+// ControlConfig holds the optional integration with the control cloud plane.
+type ControlConfig struct {
+	URL   string `json:"url"`
+	Token string `json:"token"`
 }
 
 func Default() Config {

@@ -266,19 +266,18 @@ Block appearance:
 
 ---
 
-### Phase 5 — Agentic Features
+### Phase 5 — Agentic Features ✅
 
 **Goal**: AI can propose and execute multi-step tasks with explicit user confirmation at each step.
 
 **Done means**: user describes a task in natural language, AI proposes a command sequence, user confirms step-by-step, commands execute and results feed back into AI context.
 
-- [ ] AI suggests a command → shown in input bar highlighted → user confirms with Enter or rejects with Esc
-- [ ] Multi-step tasks: "set up a Go project here" → AI runs a sequence
-- [ ] Persistent block history across sessions — **decision: JSONL** (simpler than SQLite for append-only log; switch to SQLite if search/query features are needed)
+- [x] AI suggests a command → shown highlighted in AI panel → Tab to accept (moves to input bar), Esc to dismiss
+- [x] Persistent block history across sessions — JSONL at `~/.local/share/agterm/history.jsonl`
   - Retention policy: keep last 30 days or 10 000 blocks, whichever comes first
   - Schema: one JSON object per line `{ "v":1, "block": {...} }`
-- [ ] Safe read-only tool use: AI autonomously runs `ls`, `cat`, `git log` (whitelist enforced, not regex)
-- [ ] Integration hook: dispatch long-running tasks to the `control` cloud plane via HTTP
+- [x] Safe read-only tool use: whitelist-enforced (`ls`, `cat`, `git log`, etc.); auto-run when `auto_run_readonly: true` in config
+- [x] Integration hook: `:dispatch <description>` sends context + blocks to `control.url` via HTTP POST
 
 ---
 

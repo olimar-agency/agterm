@@ -4,6 +4,6 @@
 .DS_Store
 
 # Local chat history
-HISTORY/
+/HISTORY/
 .claude/
 .github/hooks/export-history.json

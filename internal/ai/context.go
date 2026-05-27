@@ -12,7 +12,9 @@ const (
 
 	SystemPrompt = `You are an AI assistant embedded in agterm, an agentic terminal.
 Help the user understand command output, debug errors, and suggest next steps.
-Be concise. Use markdown for code blocks. Reference commands with backticks.`
+Be concise. Use markdown for code blocks. Reference commands with backticks.
+When the situation calls for a concrete action, end your reply with a single
+fenced code block containing exactly the command the user should run next.`
 )
 
 // BuildContext formats the last n completed blocks from store into a context

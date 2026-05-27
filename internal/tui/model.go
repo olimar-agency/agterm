@@ -16,8 +16,11 @@ import (
 	_ "github.com/imattos78/agterm/internal/ai/gemini"
 	_ "github.com/imattos78/agterm/internal/ai/ollama"
 	_ "github.com/imattos78/agterm/internal/ai/openai"
+	"github.com/imattos78/agterm/internal/ai/tools"
 	"github.com/imattos78/agterm/internal/block"
 	"github.com/imattos78/agterm/internal/config"
+	"github.com/imattos78/agterm/internal/history"
+	"github.com/imattos78/agterm/internal/hook"
 	ptyPkg "github.com/imattos78/agterm/internal/pty"
 )
 
@@ -41,15 +44,23 @@ type Model struct {
 	running bool
 
 	// AI panel
-	provider    ai.Provider
-	sendContext bool
-	aiOpen      bool
-	aiInput     textinput.Model
-	aiResponse  string
-	aiStreaming bool
-	aiError     string
-	aiCh        <-chan ai.StreamResult
-	aiCancel    context.CancelFunc
+	provider     ai.Provider
+	sendContext  bool
+	aiOpen       bool
+	aiInput      textinput.Model
+	aiResponse   string
+	aiStreaming  bool
+	aiError      string
+	aiCh         <-chan ai.StreamResult
+	aiCancel     context.CancelFunc
+	suggestedCmd string // non-empty when AI has proposed a command
+
+	// history
+	recorder *history.Recorder
+
+	// control plane dispatcher
+	dispatcher      *hook.Dispatcher
+	autoRunReadonly bool
 
 	// layout
 	width  int
@@ -96,6 +107,22 @@ func New() (Model, error) {
 	cfg, err := config.Load()
 	if err == nil {
 		m.provider, m.sendContext = buildProvider(cfg)
+		m.autoRunReadonly = cfg.AutoRunReadonly
+		if cfg.Control.URL != "" {
+			m.dispatcher = hook.New(cfg.Control.URL, cfg.Control.Token)
+		}
+	}
+
+	// load persistent history into the in-memory store (non-fatal)
+	if blocks, err := history.Load(history.DefaultPath()); err == nil {
+		for _, b := range blocks {
+			store.Add(b)
+		}
+	}
+
+	// open history recorder for append (non-fatal)
+	if rec, err := history.Open(history.DefaultPath()); err == nil {
+		m.recorder = rec
 	}
 
 	return m, nil
@@ -213,10 +240,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.aiOpen {
 				m.input.Focus()
 			}
-			// auto-trigger AI on non-zero exit
-			blocks := m.store.All()
-			if len(blocks) > 0 {
-				last := blocks[len(blocks)-1]
+			// persist the just-completed block
+			allBlocks := m.store.All()
+			if len(allBlocks) > 0 {
+				last := allBlocks[len(allBlocks)-1]
+				if m.recorder != nil {
+					m.recorder.Append(last) //nolint:errcheck
+				}
+				// auto-trigger AI on non-zero exit
 				if last.ExitCode != 0 && m.provider != nil && !m.aiOpen {
 					m.aiOpen = true
 					m.input.Blur()
@@ -238,6 +269,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.aiCancel != nil {
 				m.aiCancel()
 				m.aiCancel = nil
+			}
+			// extract command suggestion from completed response
+			if r.Err == nil && m.aiResponse != "" {
+				m.suggestedCmd = ai.ExtractCommand(m.aiResponse)
 			}
 		} else {
 			m.aiResponse += r.Text
@@ -261,6 +296,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.aiOpen {
 			switch msg.Type {
 			case tea.KeyEsc:
+				if m.suggestedCmd != "" {
+					// first Esc dismisses suggestion only
+					m.suggestedCmd = ""
+					break
+				}
 				// close panel; cancel any in-progress stream
 				if m.aiCancel != nil {
 					m.aiCancel()
@@ -270,15 +310,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.aiStreaming = false
 				m.aiResponse = ""
 				m.aiError = ""
+				m.suggestedCmd = ""
 				m.aiInput.SetValue("")
 				m.aiInput.Blur()
 				m.input.Focus()
+
+			case tea.KeyTab:
+				// accept the AI's suggested command: move it to the input bar
+				// (or auto-run it if it's whitelisted and auto_run_readonly is enabled)
+				if m.suggestedCmd != "" && !m.aiStreaming {
+					accepted := m.suggestedCmd
+					m.suggestedCmd = ""
+					m.aiOpen = false
+					m.aiInput.Blur()
+					m.input.Focus()
+					if m.autoRunReadonly && tools.IsWhitelisted(accepted) {
+						// auto-run whitelisted read-only command directly
+						wd, _ := os.Getwd()
+						m.parser.StartBlock(accepted, wd)
+						m.running = true
+						m.shell.Write([]byte(accepted + "\r")) //nolint:errcheck
+					} else {
+						m.input.SetValue(accepted)
+						m.input.CursorEnd()
+					}
+				}
 
 			case tea.KeyEnter:
 				if !m.aiStreaming {
 					q := strings.TrimSpace(m.aiInput.Value())
 					if q != "" {
 						m.aiInput.SetValue("")
+						m.suggestedCmd = ""
 						cmd := m.startStream(q)
 						if cmd != nil {
 							cmds = append(cmds, cmd)
@@ -332,6 +395,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else {
 						m.aiOpen = true
 						m.aiResponse = fmt.Sprintf("Switched to provider: %s", name)
+						m.aiError = ""
+						m.input.Blur()
+						m.aiInput.Focus()
+					}
+					break
+				}
+
+				// :dispatch <description> — send context to the control plane
+				if strings.HasPrefix(cmd, ":dispatch ") {
+					desc := strings.TrimSpace(strings.TrimPrefix(cmd, ":dispatch "))
+					m.input.SetValue("")
+					if m.dispatcher == nil {
+						m.aiOpen = true
+						m.aiError = "control.url not set in config"
+						m.aiResponse = ""
+						m.input.Blur()
+						m.aiInput.Focus()
+					} else {
+						blocks := m.store.All()
+						d := m.dispatcher
+						go func() {
+							d.Dispatch(desc, blocks) //nolint:errcheck
+						}()
+						m.aiOpen = true
+						m.aiResponse = fmt.Sprintf("Dispatched: %s", desc)
 						m.aiError = ""
 						m.input.Blur()
 						m.aiInput.Focus()
@@ -431,8 +519,19 @@ func (m Model) renderAIPanel() string {
 		status = dimStyle.Render("[no context — set send_context: true in config to enable]")
 	}
 
-	// response area (panelHeight - 3: divider + status + input bar)
+	// response area — shrink by 1 if there's a suggestion bar
+	suggestionBar := ""
+	if m.suggestedCmd != "" && !m.aiStreaming {
+		suggestionBar = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("2")).Bold(true).
+			Render(fmt.Sprintf("  ❯ %s", m.suggestedCmd)) +
+			dimStyle.Render("  [Tab to run · Esc to dismiss]")
+	}
+
 	responseH := aiPanelHeight - 3
+	if suggestionBar != "" {
+		responseH--
+	}
 	if responseH < 1 {
 		responseH = 1
 	}
@@ -448,7 +547,12 @@ func (m Model) renderAIPanel() string {
 	}
 	response := strings.Join(respLines, "\n")
 
-	return strings.Join([]string{divider, response, status}, "\n")
+	parts := []string{divider, response}
+	if suggestionBar != "" {
+		parts = append(parts, suggestionBar)
+	}
+	parts = append(parts, status)
+	return strings.Join(parts, "\n")
 }
 
 // ── block rendering ───────────────────────────────────────────────────────────
