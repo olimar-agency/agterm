@@ -13,10 +13,34 @@ import (
 	"github.com/imattos78/agterm/internal/config"
 )
 
+// compatibleProviders lists OpenAI-compatible services that use this adapter.
+// Each maps to its default base URL and default model.
+var compatibleProviders = []struct {
+	name     string
+	baseURL  string
+	defModel string
+}{
+	{"openai", "https://api.openai.com", "gpt-4o-mini"},
+	{"deepseek", "https://api.deepseek.com", "deepseek-chat"},
+	{"openrouter", "https://openrouter.ai/api", "deepseek/deepseek-chat-v3-0324:free"},
+	{"groq", "https://api.groq.com/openai", "llama-3.3-70b-versatile"},
+	{"together", "https://api.together.xyz", "meta-llama/Llama-3.3-70B-Instruct-Turbo"},
+	{"mistral", "https://api.mistral.ai", "mistral-small-latest"},
+}
+
 func init() {
-	ai.Register("openai", func(apiKey, baseURL, model string) ai.Provider {
-		return New(config.ProviderConfig{APIKey: apiKey, BaseURL: baseURL, Model: model})
-	})
+	for _, p := range compatibleProviders {
+		p := p // capture
+		ai.Register(p.name, func(apiKey, baseURL, model string) ai.Provider {
+			if baseURL == "" {
+				baseURL = p.baseURL
+			}
+			if model == "" {
+				model = p.defModel
+			}
+			return New(config.ProviderConfig{APIKey: apiKey, BaseURL: baseURL, Model: model})
+		})
+	}
 }
 
 const (
