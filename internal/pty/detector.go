@@ -2,7 +2,7 @@ package pty
 
 import (
 	"bytes"
-	"fmt"
+	"strconv"
 )
 
 // SegKind classifies a segment returned by the Detector.
@@ -76,8 +76,10 @@ func (d *Detector) Process(raw []byte) []Segment {
 		case bytes.Equal(seq, []byte("C")):
 			segs = append(segs, Segment{Kind: SegCommandStart})
 		case bytes.HasPrefix(seq, []byte("D;")):
-			var code int
-			fmt.Sscanf(string(seq[2:]), "%d", &code)
+			code := -1
+			if parsed, err := strconv.Atoi(string(seq[2:])); err == nil {
+				code = parsed
+			}
 			segs = append(segs, Segment{Kind: SegCommandEnd, ExitCode: code})
 		}
 		// other OSC 133 variants (A prompt-start, B command-start) are stripped silently

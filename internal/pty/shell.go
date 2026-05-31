@@ -1,6 +1,7 @@
 package pty
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 
@@ -38,7 +39,20 @@ func (s *Shell) Resize(rows, cols uint16) error {
 	return creackpty.Setsize(s.ptm, &creackpty.Winsize{Rows: rows, Cols: cols})
 }
 
-func (s *Shell) Close() {
-	s.cmd.Process.Kill()
-	s.ptm.Close()
+func (s *Shell) Close() error {
+	var firstErr error
+
+	if s.cmd != nil && s.cmd.Process != nil {
+		if err := s.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			firstErr = err
+		}
+	}
+
+	if s.ptm != nil {
+		if err := s.ptm.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	return firstErr
 }

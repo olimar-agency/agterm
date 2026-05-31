@@ -116,3 +116,22 @@ func TestInstall_BackupCreated(t *testing.T) {
 		t.Error("backup file not created")
 	}
 }
+
+func TestInstall_FishCreatesDirAndFiles(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("SHELL", "/usr/bin/fish")
+
+	rc := filepath.Join(dir, ".config", "fish", "config.fish")
+
+	if err := runInstall(nil); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	if _, err := os.Stat(rc); err != nil {
+		t.Fatalf("fish config file not created: %v", err)
+	}
+	if _, err := os.Stat(rc + ".agterm.bak"); err != nil {
+		t.Fatalf("backup file not created: %v", err)
+	}
+}

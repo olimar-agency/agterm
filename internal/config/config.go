@@ -19,7 +19,7 @@ type Config struct {
 	Version         int                       `json:"version"`
 	Provider        string                    `json:"provider"`
 	LocalOnly       bool                      `json:"local_only"`        // disables all remote providers
-	AutoRunReadonly bool                       `json:"auto_run_readonly"` // auto-execute whitelisted read-only suggestions
+	AutoRunReadonly bool                      `json:"auto_run_readonly"` // auto-execute whitelisted read-only suggestions
 	Control         ControlConfig             `json:"control"`
 	Providers       map[string]ProviderConfig `json:"providers"`
 }
@@ -43,9 +43,12 @@ func Default() Config {
 	}
 }
 
-func DefaultPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "agterm", "config.json")
+func DefaultPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("determine home directory: %w", err)
+	}
+	return filepath.Join(home, ".config", "agterm", "config.json"), nil
 }
 
 // Load reads config from DefaultPath, falls back to defaults if the file
@@ -53,8 +56,12 @@ func DefaultPath() string {
 // Migration detection runs on every load; the file is never rewritten here.
 func Load() (Config, error) {
 	cfg := Default()
+	path, err := DefaultPath()
+	if err != nil {
+		return cfg, err
+	}
 
-	data, err := os.ReadFile(DefaultPath())
+	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return cfg, nil
 	}

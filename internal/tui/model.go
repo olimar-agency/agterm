@@ -29,6 +29,10 @@ import (
 type ptyMsg struct{ segs []ptyPkg.Segment }
 type errMsg struct{ err error }
 type aiChunkMsg ai.StreamResult
+type dispatchDoneMsg struct {
+	desc string
+	err  error
+}
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -114,15 +118,17 @@ func New() (Model, error) {
 	}
 
 	// load persistent history into the in-memory store (non-fatal)
-	if blocks, err := history.Load(history.DefaultPath()); err == nil {
-		for _, b := range blocks {
-			store.Add(b)
+	if historyPath, err := history.DefaultPath(); err == nil {
+		if blocks, err := history.Load(historyPath); err == nil {
+			for _, b := range blocks {
+				store.Add(b)
+			}
 		}
-	}
 
-	// open history recorder for append (non-fatal)
-	if rec, err := history.Open(history.DefaultPath()); err == nil {
-		m.recorder = rec
+		// open history recorder for append (non-fatal)
+		if rec, err := history.Open(historyPath); err == nil {
+			m.recorder = rec
+		}
 	}
 
 	return m, nil
@@ -189,6 +195,12 @@ func readNextAI(ch <-chan ai.StreamResult) tea.Cmd {
 	}
 }
 
+func dispatchCmd(d *hook.Dispatcher, description string, blocks []*block.Block) tea.Cmd {
+	return func() tea.Msg {
+		return dispatchDoneMsg{desc: description, err: d.Dispatch(description, blocks)}
+	}
+}
+
 func (m *Model) startStream(question string) tea.Cmd {
 	if m.provider == nil {
 		m.aiError = "No AI provider configured — add one to ~/.config/agterm/config.json"
@@ -217,6 +229,25 @@ func (m *Model) startStream(question string) tea.Cmd {
 	m.aiCh = m.provider.Stream(cancelCtx, req)
 	m.aiCancel = cancel
 	return readNextAI(m.aiCh)
+}
+
+func (m *Model) shutdown() {
+	if m.aiCancel != nil {
+		m.aiCancel()
+		m.aiCancel = nil
+	}
+	m.parser.Flush()
+	if m.recorder != nil {
+		if err := m.recorder.Close(); err != nil && m.err == nil {
+			m.err = fmt.Errorf("close history recorder: %w", err)
+		}
+		m.recorder = nil
+	}
+	if m.shell != nil {
+		if err := m.shell.Close(); err != nil && m.err == nil {
+			m.err = fmt.Errorf("close shell: %w", err)
+		}
+	}
 }
 
 // ── Update ────────────────────────────────────────────────────────────────────
@@ -281,14 +312,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case dispatchDoneMsg:
+		m.aiOpen = true
+		m.input.Blur()
+		m.aiInput.Focus()
+		if msg.err != nil {
+			m.aiError = msg.err.Error()
+			m.aiResponse = ""
+		} else {
+			m.aiError = ""
+			m.aiResponse = fmt.Sprintf("Dispatched: %s", msg.desc)
+		}
+
 	case errMsg:
 		m.err = msg.err
+		m.shutdown()
 		return m, tea.Quit
 
 	case tea.KeyMsg:
 		if m.running {
 			if b := keyBytes(msg); b != nil {
-				m.shell.Write(b) //nolint:errcheck
+				if _, err := m.shell.Write(b); err != nil {
+					m.err = fmt.Errorf("write to shell: %w", err)
+					m.shutdown()
+					return m, tea.Quit
+				}
 			}
 			break
 		}
@@ -329,7 +377,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						wd, _ := os.Getwd()
 						m.parser.StartBlock(accepted, wd)
 						m.running = true
-						m.shell.Write([]byte(accepted + "\r")) //nolint:errcheck
+						if _, err := m.shell.Write([]byte(accepted + "\r")); err != nil {
+							m.err = fmt.Errorf("write to shell: %w", err)
+							m.shutdown()
+							return m, tea.Quit
+						}
 					} else {
 						m.input.SetValue(accepted)
 						m.input.CursorEnd()
@@ -350,8 +402,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 			case tea.KeyCtrlC, tea.KeyCtrlD:
-				m.parser.Flush()
-				m.shell.Close()
+				m.shutdown()
 				return m, tea.Quit
 
 			default:
@@ -375,8 +426,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.aiInput.Focus()
 
 		case tea.KeyCtrlC, tea.KeyCtrlD:
-			m.parser.Flush()
-			m.shell.Close()
+			m.shutdown()
 			return m, tea.Quit
 
 		case tea.KeyEnter:
@@ -413,23 +463,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.input.Blur()
 						m.aiInput.Focus()
 					} else {
-						blocks := m.store.All()
+						blocks := append([]*block.Block(nil), m.store.All()...)
 						d := m.dispatcher
-						go func() {
-							d.Dispatch(desc, blocks) //nolint:errcheck
-						}()
 						m.aiOpen = true
-						m.aiResponse = fmt.Sprintf("Dispatched: %s", desc)
+						m.aiResponse = fmt.Sprintf("Dispatching: %s", desc)
 						m.aiError = ""
 						m.input.Blur()
 						m.aiInput.Focus()
+						cmds = append(cmds, dispatchCmd(d, desc, blocks))
 					}
 					break
 				}
 				wd, _ := os.Getwd()
 				m.parser.StartBlock(cmd, wd)
 				m.running = true
-				m.shell.Write([]byte(cmd + "\r")) //nolint:errcheck
+				if _, err := m.shell.Write([]byte(cmd + "\r")); err != nil {
+					m.err = fmt.Errorf("write to shell: %w", err)
+					m.shutdown()
+					return m, tea.Quit
+				}
 				m.input.SetValue("")
 			}
 

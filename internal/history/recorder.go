@@ -3,6 +3,7 @@ package history
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -30,9 +31,12 @@ type Recorder struct {
 }
 
 // DefaultPath returns ~/.local/share/agterm/history.jsonl.
-func DefaultPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "agterm", "history.jsonl")
+func DefaultPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("determine home directory: %w", err)
+	}
+	return filepath.Join(home, ".local", "share", "agterm", "history.jsonl"), nil
 }
 
 // Open creates (or appends to) the history file at path.
@@ -66,7 +70,9 @@ func (r *Recorder) Append(b *block.Block) error {
 func (r *Recorder) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.w.Flush() //nolint:errcheck
+	if err := r.w.Flush(); err != nil {
+		return err
+	}
 	return r.f.Close()
 }
 

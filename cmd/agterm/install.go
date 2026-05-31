@@ -56,9 +56,12 @@ func shellName() (string, error) {
 	return "", fmt.Errorf("unsupported shell %q — supported: zsh, bash, fish", shell)
 }
 
-func rcPath(name string) string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, rcFileByShell[name])
+func rcPath(name string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("determine home directory: %w", err)
+	}
+	return filepath.Join(home, rcFileByShell[name]), nil
 }
 
 func runInstall(args []string) error {
@@ -73,7 +76,10 @@ func runInstall(args []string) error {
 	if err != nil {
 		return err
 	}
-	rc := rcPath(name)
+	rc, err := rcPath(name)
+	if err != nil {
+		return err
+	}
 	hooks := hooksByShell[name]
 
 	existing, err := os.ReadFile(rc)
@@ -93,12 +99,13 @@ func runInstall(args []string) error {
 		return nil
 	}
 
+	if err := os.MkdirAll(filepath.Dir(rc), 0o755); err != nil {
+		return fmt.Errorf("creating dirs: %w", err)
+	}
+
 	// backup before modifying
 	if err := os.WriteFile(rc+".agterm.bak", existing, 0o644); err != nil {
 		return fmt.Errorf("creating backup: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(rc), 0o755); err != nil {
-		return fmt.Errorf("creating dirs: %w", err)
 	}
 	if err := os.WriteFile(rc, []byte(newContent), 0o644); err != nil {
 		return fmt.Errorf("writing %s: %w", rc, err)
@@ -115,7 +122,10 @@ func runUninstall(args []string) error {
 	if err != nil {
 		return err
 	}
-	rc := rcPath(name)
+	rc, err := rcPath(name)
+	if err != nil {
+		return err
+	}
 
 	existing, err := os.ReadFile(rc)
 	if err != nil {
