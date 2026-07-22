@@ -87,7 +87,7 @@ type Line []Cell
 - `Color` es struct propio (no `lipgloss.Color`) → `internal/vt/` queda **sin dependencias de rendering**. `lipgloss` vive solo en `internal/tui/`, que traduce `Cell → lipgloss.Style` al pintar.
 - `Attr` como bitmask: una pantalla de 200×50 = 10K cells; el tamaño del struct importa.
 - `Width` reservado como comentario (no se implementa) para evitar un ABI break en Phase 8.
-- `type Line []Cell` deja la puerta abierta a un pool/ring en Phase 7.
+- `type Line []Cell` es **la unidad que consumen `Block.Cells` y `PlainText`** (no `[][]Cell` crudo). Así el backing store de una línea puede cambiar a un pool/ring en Phase 7 sin tocar consumidores.
 
 ---
 
@@ -100,7 +100,7 @@ type Block struct {
     ID        string
     Command   string
     Output    string   // DEPRECATED post-Phase 9; mantener durante 6–8
-    Cells     [][]Cell // source of truth desde Phase 6
+    Cells     []Line   // source of truth desde Phase 6 (Line = []Cell)
     ExitCode  int
     Duration  time.Duration
     WorkDir   string
@@ -142,7 +142,7 @@ Reglas que el implementador **no puede reabrir** sin volver a Architect:
 
 ```go
 // internal/vt/view.go
-func PlainText(cells [][]Cell) string // strip de estilos; para la IA en fase transicional
+func PlainText(cells []Line) string // strip de estilos; para la IA en fase transicional
 ```
 
 En Phase 9 se añadirá `SemanticText` (marcadores tipo `error`, `path`, `url`), pero `PlainText` basta para no bloquear la Phase 5 mientras Phase 6 avanza. **El `Provider` interface no cambia.**
@@ -182,7 +182,7 @@ Todo lo demás (cursor positioning, char sets, DCS complejos) puede ser **consum
 | 1 | `Cell` crece en Phase 8 (wide chars, OSC 8 hyperlinks, sixel) | `Width` reservado + `Attr` bitmask extensible |
 | 2 | Doble source of truth `Output`+`Cells` (6–9) diverge | Test invariante `PlainText(Cells) == Output` |
 | 3 | Parser incompleto degrada IA en Phase 9 | Set mínimo obligatorio (§8) |
-| 4 | Performance `[][]Cell` en scrollback (Phase 7) | `type Line []Cell` → cambiar backing store sin tocar consumidores |
+| 4 | Performance de `[]Line` en scrollback (Phase 7) | Consumidores usan `[]Line` → cambiar el backing store de `Line` (pool/ring) sin tocarlos |
 | 5 | Regresión sobre OSC 133 (`detector.go` comparte input stream) | Gate QA: 61 tests + suite ANSI antes de merge |
 | 6 | `charmbracelet/x/ansi` es lib joven | Validar madurez / alternativas antes de comprometer |
 
