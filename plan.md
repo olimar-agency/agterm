@@ -266,18 +266,19 @@ Block appearance:
 
 ---
 
-### Phase 5 — Agentic Features ✅
+### Phase 5 — Agentic Features (read-only) ✅
 
-**Goal**: AI can propose and execute multi-step tasks with explicit user confirmation at each step.
+**Goal**: AI can suggest and, for safe read-only commands, auto-run steps with explicit user confirmation.
 
-**Done means**: user describes a task in natural language, AI proposes a command sequence, user confirms step-by-step, commands execute and results feed back into AI context.
+**Done means**: user describes a task in natural language, AI proposes a command, user confirms (or it auto-runs if whitelisted), the result feeds back into AI context.
 
 - [x] AI suggests a command → shown highlighted in AI panel → Tab to accept (moves to input bar), Esc to dismiss
 - [x] Persistent block history across sessions — JSONL at `~/.local/share/agterm/history.jsonl`
   - Retention policy: keep last 30 days or 10 000 blocks, whichever comes first
   - Schema: one JSON object per line `{ "v":1, "block": {...} }`
 - [x] Safe read-only tool use: whitelist-enforced (`ls`, `cat`, `git log`, etc.); auto-run when `auto_run_readonly: true` in config
-- [x] Integration hook: `:dispatch <description>` sends context + blocks to `control.url` via HTTP POST
+
+`:dispatch` (POSTing context + blocks to an external control plane) was removed (#4) — the control plane it targeted doesn't exist yet. Reintroduce post-Phase 12 once there's a stable contract for external agent handoff.
 
 ---
 
