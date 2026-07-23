@@ -1,6 +1,12 @@
 package block
 
-import "time"
+import (
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/imattos78/agterm/internal/vt"
+)
 
 type Block struct {
 	ID        string
@@ -10,6 +16,33 @@ type Block struct {
 	Duration  time.Duration
 	WorkDir   string
 	StartedAt time.Time
+
+	// Cells is the styled cell grid, populated by the VT parser (Phase 6+).
+	// Coexists with Output during the transition (agterm#6); nil for blocks
+	// loaded from history written before this field existed. Not persisted —
+	// history.jsonl stores Output only.
+	Cells [][]vt.Cell `json:"-"`
+}
+
+var ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+
+// PlainText is the only surface the AI Provider layer should read from a
+// Block — it is deterministic and strips all style/color information.
+// Truncation policy is the Provider's responsibility, applied to this
+// result, never to Cells.
+func (b *Block) PlainText() string {
+	if b.Cells == nil {
+		return ansiEscapeRE.ReplaceAllString(b.Output, "")
+	}
+	rows := make([]string, len(b.Cells))
+	for i, row := range b.Cells {
+		var sb strings.Builder
+		for _, c := range row {
+			sb.WriteRune(c.Rune)
+		}
+		rows[i] = sb.String()
+	}
+	return strings.Join(rows, "\n")
 }
 
 type Store struct {

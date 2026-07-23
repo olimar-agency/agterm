@@ -32,7 +32,7 @@ func BuildContext(store *block.Store, n int) string {
 	for _, b := range blocks {
 		fmt.Fprintf(&sb, "$ %s  (exit %d, %.1fs)\n", b.Command, b.ExitCode, b.Duration.Seconds())
 
-		out := strings.TrimRight(b.Output, "\n")
+		out := strings.TrimRight(b.PlainText(), "\n")
 		if out != "" {
 			if len(out) > maxOutputChars {
 				out = out[:maxOutputChars] + "\n[output truncated]"

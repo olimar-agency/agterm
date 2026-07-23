@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/imattos78/agterm/internal/pty"
+	"github.com/imattos78/agterm/internal/vt"
 )
 
 // Parser assembles PTY segments into Blocks. Call StartBlock before sending a
@@ -15,6 +16,11 @@ type Parser struct {
 	store   *Store
 	active  *Block
 	counter int
+
+	// vtParser and rowBuf accumulate the active block's Cells. One vt.Parser
+	// per block, so SGR state never leaks across commands (agterm#6).
+	vtParser *vt.Parser
+	rowBuf   []vt.Cell
 }
 
 // NewParser creates a Parser backed by the given Store.
@@ -37,6 +43,8 @@ func (p *Parser) StartBlock(cmd, workDir string) {
 		WorkDir:   workDir,
 		StartedAt: time.Now(),
 	}
+	p.vtParser = vt.NewParser()
+	p.rowBuf = nil
 }
 
 // Feed processes an ordered slice of segments from the Detector.
@@ -50,6 +58,8 @@ func (p *Parser) Feed(segs []pty.Segment) {
 				out := strings.ReplaceAll(string(seg.Data), "\r\n", "\n")
 				out = strings.ReplaceAll(out, "\r", "")
 				p.active.Output += out
+
+				p.feedVT(seg.Data)
 			}
 
 		case pty.SegCommandStart:
@@ -60,6 +70,7 @@ func (p *Parser) Feed(segs []pty.Segment) {
 
 		case pty.SegCommandEnd:
 			if p.active != nil {
+				p.flushVTRow()
 				p.active.ExitCode = seg.ExitCode
 				p.active.Duration = time.Since(p.active.StartedAt)
 				p.store.Add(p.active)
@@ -72,9 +83,37 @@ func (p *Parser) Feed(segs []pty.Segment) {
 // Flush closes any open block without a clean exit (e.g. on session close).
 func (p *Parser) Flush() {
 	if p.active != nil {
+		p.flushVTRow()
 		p.active.ExitCode = -1
 		p.active.Duration = time.Since(p.active.StartedAt)
 		p.store.Add(p.active)
 		p.active = nil
+	}
+}
+
+// feedVT feeds raw (pre-normalisation) bytes to the active block's VT
+// parser and groups the resulting cells into rows, splitting on '\n' —
+// consistent with the CRLF→LF normalisation already applied to Output.
+// Bare '\r' is dropped for the same reason.
+func (p *Parser) feedVT(data []byte) {
+	for _, c := range p.vtParser.Feed(data) {
+		switch c.Rune {
+		case '\r':
+			continue
+		case '\n':
+			p.active.Cells = append(p.active.Cells, p.rowBuf)
+			p.rowBuf = nil
+		default:
+			p.rowBuf = append(p.rowBuf, c)
+		}
+	}
+}
+
+// flushVTRow appends any pending, not-yet-newline-terminated row to Cells —
+// covers output whose last line has no trailing '\n' before the block closes.
+func (p *Parser) flushVTRow() {
+	if len(p.rowBuf) > 0 {
+		p.active.Cells = append(p.active.Cells, p.rowBuf)
+		p.rowBuf = nil
 	}
 }
