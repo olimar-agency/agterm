@@ -11,6 +11,8 @@ const (
 	stateGround parserState = iota
 	stateEsc
 	stateCSI
+	stateString    // inside OSC/DCS/PM/APC payload, terminated by BEL or ST
+	stateStringEsc // saw ESC while in stateString, expecting '\\' to close ST
 )
 
 // Parser is an incremental ANSI/SGR parser. It is stateful across calls to
@@ -43,6 +45,10 @@ func (p *Parser) Feed(data []byte) []Cell {
 			p.feedEsc(c)
 		case stateCSI:
 			p.feedCSI(c)
+		case stateString:
+			p.feedString(c)
+		case stateStringEsc:
+			p.feedStringEsc(c)
 		}
 	}
 	return cells
@@ -80,12 +86,35 @@ func (p *Parser) flushInvalidUTF8(cells []Cell) []Cell {
 }
 
 func (p *Parser) feedEsc(c byte) {
-	if c == '[' {
+	switch c {
+	case '[':
 		p.state = stateCSI
 		p.csiBuf = p.csiBuf[:0]
-		return
+	case ']', 'P', '^', '_':
+		// OSC / DCS / PM / APC — string-type sequences terminated by BEL or
+		// ST (ESC \\). Out of scope for this slice per the contract; consumed
+		// and ignored so their payload never leaks into Cells as runes.
+		p.state = stateString
+	default:
+		// Unsupported escape — silently dropped.
+		p.state = stateGround
 	}
-	// Unsupported escape (not CSI) — silently dropped.
+}
+
+// feedString consumes the payload of an OSC/DCS/PM/APC sequence until its
+// terminator (BEL, or ESC '\\' i.e. ST), discarding every byte silently.
+func (p *Parser) feedString(c byte) {
+	switch c {
+	case 0x07: // BEL
+		p.state = stateGround
+	case 0x1B:
+		p.state = stateStringEsc
+	}
+}
+
+func (p *Parser) feedStringEsc(byte) {
+	// ST is ESC '\\'; whether or not this byte confirms it, this slice
+	// returns to ground rather than reprocessing it as a fresh escape byte.
 	p.state = stateGround
 }
 

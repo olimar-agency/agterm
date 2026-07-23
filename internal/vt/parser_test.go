@@ -163,6 +163,39 @@ func TestDECSETIgnoredSilently(t *testing.T) {
 	}
 }
 
+func TestOSCSequenceIgnoredSilently(t *testing.T) {
+	p := NewParser()
+	cells := p.Feed([]byte("\x1b]0;title\x07X"))
+	if runesOf(cells) != "X" {
+		t.Fatalf("OSC payload leaked into cells: got %q, want \"X\"", runesOf(cells))
+	}
+}
+
+func TestOSCSequenceTerminatedByST(t *testing.T) {
+	p := NewParser()
+	cells := p.Feed([]byte("\x1b]8;;http://example.com\x1b\\X"))
+	if runesOf(cells) != "X" {
+		t.Fatalf("ST-terminated OSC payload leaked into cells: got %q, want \"X\"", runesOf(cells))
+	}
+}
+
+func TestOSCFragmentedAcrossChunks(t *testing.T) {
+	p := NewParser()
+	p.Feed([]byte("\x1b]0;partial tit"))
+	cells := p.Feed([]byte("le\x07X"))
+	if runesOf(cells) != "X" {
+		t.Fatalf("fragmented OSC payload leaked into cells: got %q, want \"X\"", runesOf(cells))
+	}
+}
+
+func TestDCSSequenceIgnoredSilently(t *testing.T) {
+	p := NewParser()
+	cells := p.Feed([]byte("\x1bPsome dcs payload\x1b\\X"))
+	if runesOf(cells) != "X" {
+		t.Fatalf("DCS payload leaked into cells: got %q, want \"X\"", runesOf(cells))
+	}
+}
+
 func TestParserStateSurvivesAcrossFeeds(t *testing.T) {
 	p := NewParser()
 	p.Feed([]byte("\x1b[1m"))

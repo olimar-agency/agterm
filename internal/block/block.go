@@ -31,13 +31,20 @@ type Block struct {
 // does for freshly-parsed blocks.
 var ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-?]*[@-~]`)
 
+// oscDCSRE matches OSC/DCS/PM/APC string-type sequences (ESC ] | ESC P |
+// ESC ^ | ESC _ ... terminated by BEL or ST), e.g. an xterm title-set
+// "\x1b]0;title\x07". vt.Parser drops these silently for freshly-parsed
+// blocks (Cells != nil); this mirrors that for the legacy fallback.
+var oscDCSRE = regexp.MustCompile(`\x1b[\]P^_].*?(\x07|\x1b\\)`)
+
 // PlainText is the only surface the AI Provider layer should read from a
 // Block — it is deterministic and strips all style/color information.
 // Truncation policy is the Provider's responsibility, applied to this
 // result, never to Cells.
 func (b *Block) PlainText() string {
 	if b.Cells == nil {
-		return ansiEscapeRE.ReplaceAllString(b.Output, "")
+		s := ansiEscapeRE.ReplaceAllString(b.Output, "")
+		return oscDCSRE.ReplaceAllString(s, "")
 	}
 	rows := make([]string, len(b.Cells))
 	for i, row := range b.Cells {
