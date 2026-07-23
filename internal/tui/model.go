@@ -20,7 +20,6 @@ import (
 	"github.com/imattos78/agterm/internal/block"
 	"github.com/imattos78/agterm/internal/config"
 	"github.com/imattos78/agterm/internal/history"
-	"github.com/imattos78/agterm/internal/hook"
 	ptyPkg "github.com/imattos78/agterm/internal/pty"
 )
 
@@ -29,10 +28,6 @@ import (
 type ptyMsg struct{ segs []ptyPkg.Segment }
 type errMsg struct{ err error }
 type aiChunkMsg ai.StreamResult
-type dispatchDoneMsg struct {
-	desc string
-	err  error
-}
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -62,8 +57,6 @@ type Model struct {
 	// history
 	recorder *history.Recorder
 
-	// control plane dispatcher
-	dispatcher      *hook.Dispatcher
 	autoRunReadonly bool
 
 	// layout
@@ -112,9 +105,6 @@ func New() (Model, error) {
 	if err == nil {
 		m.provider, m.sendContext = buildProvider(cfg)
 		m.autoRunReadonly = cfg.AutoRunReadonly
-		if cfg.Control.URL != "" {
-			m.dispatcher = hook.New(cfg.Control.URL, cfg.Control.Token)
-		}
 	}
 
 	// load persistent history into the in-memory store (non-fatal)
@@ -192,12 +182,6 @@ func (m Model) readPTY() tea.Cmd {
 func readNextAI(ch <-chan ai.StreamResult) tea.Cmd {
 	return func() tea.Msg {
 		return aiChunkMsg(<-ch)
-	}
-}
-
-func dispatchCmd(d *hook.Dispatcher, description string, blocks []*block.Block) tea.Cmd {
-	return func() tea.Msg {
-		return dispatchDoneMsg{desc: description, err: d.Dispatch(description, blocks)}
 	}
 }
 
@@ -310,18 +294,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.aiCh != nil {
 				cmds = append(cmds, readNextAI(m.aiCh))
 			}
-		}
-
-	case dispatchDoneMsg:
-		m.aiOpen = true
-		m.input.Blur()
-		m.aiInput.Focus()
-		if msg.err != nil {
-			m.aiError = msg.err.Error()
-			m.aiResponse = ""
-		} else {
-			m.aiError = ""
-			m.aiResponse = fmt.Sprintf("Dispatched: %s", msg.desc)
 		}
 
 	case errMsg:
@@ -452,28 +424,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 
-				// :dispatch <description> — send context to the control plane
-				if strings.HasPrefix(cmd, ":dispatch ") {
-					desc := strings.TrimSpace(strings.TrimPrefix(cmd, ":dispatch "))
-					m.input.SetValue("")
-					if m.dispatcher == nil {
-						m.aiOpen = true
-						m.aiError = "control.url not set in config"
-						m.aiResponse = ""
-						m.input.Blur()
-						m.aiInput.Focus()
-					} else {
-						blocks := append([]*block.Block(nil), m.store.All()...)
-						d := m.dispatcher
-						m.aiOpen = true
-						m.aiResponse = fmt.Sprintf("Dispatching: %s", desc)
-						m.aiError = ""
-						m.input.Blur()
-						m.aiInput.Focus()
-						cmds = append(cmds, dispatchCmd(d, desc, blocks))
-					}
-					break
-				}
 				wd, _ := os.Getwd()
 				m.parser.StartBlock(cmd, wd)
 				m.running = true
