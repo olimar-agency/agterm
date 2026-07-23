@@ -166,8 +166,17 @@ func (p *Parser) applySGR(buf []byte) {
 	}
 }
 
+// unparseableSGRParam is a sentinel for a non-empty parameter segment that
+// isn't a plain decimal number (e.g. colon-separated subparams like
+// "38:2:255:0:0"). It intentionally matches no case in applySGR's switch, so
+// it's ignored rather than misread as an SGR reset.
+const unparseableSGRParam = -1
+
 // parseSGRParams splits a ';'-separated CSI parameter buffer into ints. An
-// empty buffer (bare "\x1b[m") means reset, i.e. a single 0 parameter.
+// empty buffer (bare "\x1b[m") means reset, i.e. a single 0 parameter. An
+// empty segment between semicolons (e.g. "\x1b[;1m") also defaults to 0, per
+// ECMA-48. A segment that isn't a plain decimal number yields
+// unparseableSGRParam instead of silently coercing to 0.
 func parseSGRParams(buf []byte) []int {
 	if len(buf) == 0 {
 		return []int{0}
@@ -179,9 +188,11 @@ func parseSGRParams(buf []byte) []int {
 			seg := buf[start:i]
 			n := 0
 			if len(seg) > 0 {
-				if v, err := strconv.Atoi(string(seg)); err == nil {
-					n = v
+				v, err := strconv.Atoi(string(seg))
+				if err != nil {
+					v = unparseableSGRParam
 				}
+				n = v
 			}
 			params = append(params, n)
 			start = i + 1

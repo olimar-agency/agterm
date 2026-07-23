@@ -24,7 +24,12 @@ type Block struct {
 	Cells [][]vt.Cell `json:"-"`
 }
 
-var ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+// ansiEscapeRE matches a CSI sequence per ECMA-48: parameter bytes 0-9:;<=>?
+// (0x30-0x3F) followed by any final byte (0x40-0x7E). The parameter class
+// must include '?' etc. — private-mode sequences like "\x1b[?25h" — or they
+// leak through untouched instead of being stripped, unlike what vt.Parser
+// does for freshly-parsed blocks.
+var ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-?]*[@-~]`)
 
 // PlainText is the only surface the AI Provider layer should read from a
 // Block — it is deterministic and strips all style/color information.

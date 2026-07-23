@@ -91,12 +91,12 @@ func TestSGRTruecolorFallback(t *testing.T) {
 	}
 }
 
-func TestSGRTruecolorFallbackThenTrailingParamsApply(t *testing.T) {
+func TestSGR256ColorFallbackThenTrailingParamsApply(t *testing.T) {
 	p := NewParser()
 	cells := p.Feed([]byte("\x1b[38;5;123;1;31mA"))
 	c := cells[0]
 	if _, ok := c.Style.Fg.(ColorIndexed); !ok {
-		t.Fatalf("expected trailing '1;31' to apply after truecolor fallback skip, got fg=%+v", c.Style.Fg)
+		t.Fatalf("expected trailing '1;31' to apply after 256-color fallback skip, got fg=%+v", c.Style.Fg)
 	}
 	fg := c.Style.Fg.(ColorIndexed)
 	if fg.Index != 1 {
@@ -104,6 +104,25 @@ func TestSGRTruecolorFallbackThenTrailingParamsApply(t *testing.T) {
 	}
 	if c.Style.Attributes&AttrBold == 0 {
 		t.Error("expected bold to apply after skipping the 256-color subparams")
+	}
+}
+
+// TestSGRColonSeparatedSubparamsIgnoredNotReset guards against a colon-form
+// SGR (e.g. the ITU-T T.416 truecolor spelling "38:2:255:0:0", vs. the
+// semicolon form this parser supports) being misparsed as SGR 0 (reset) —
+// parseSGRParams must yield an ignored sentinel, not silently coerce to 0.
+func TestSGRColonSeparatedSubparamsIgnoredNotReset(t *testing.T) {
+	p := NewParser()
+	p.Feed([]byte("\x1b[1m"))
+	cells := p.Feed([]byte("\x1b[38:2:255:0:0mA"))
+	if len(cells) != 1 || cells[0].Rune != 'A' {
+		t.Fatalf("expected single clean cell 'A', got %+v", cells)
+	}
+	if cells[0].Style.Attributes&AttrBold == 0 {
+		t.Fatal("colon-form SGR must not reset prior style — bold should survive")
+	}
+	if _, ok := cells[0].Style.Fg.(ColorDefault); !ok {
+		t.Fatalf("expected fg to stay at default (unset), got %+v", cells[0].Style.Fg)
 	}
 }
 
