@@ -49,7 +49,7 @@ func (s *Shell) Close() error {
 	}
 
 	if s.ptm != nil {
-		if err := s.ptm.Close(); err != nil && firstErr == nil {
+		if err := s.ptm.Close(); err != nil && !errors.Is(err, os.ErrClosed) && firstErr == nil {
 			firstErr = err
 		}
 	}
