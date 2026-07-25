@@ -1,10 +1,20 @@
 package pty
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+// requireBinary skips the test when path isn't present, so these tests
+// don't fail on minimal/container environments lacking a full shell set.
+func requireBinary(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("%s not available: %v", path, err)
+	}
+}
 
 // readWithTimeout reads from s until data is available or the timeout
 // elapses, avoiding a hung test if the shell never produces output.
@@ -34,6 +44,7 @@ func readWithTimeout(t *testing.T, s *Shell, timeout time.Duration) string {
 }
 
 func TestNew_SpawnsRequestedShell(t *testing.T) {
+	requireBinary(t, "/bin/sh")
 	s, err := New("/bin/sh")
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -49,6 +60,7 @@ func TestNew_SpawnsRequestedShell(t *testing.T) {
 }
 
 func TestNew_FallsBackToShellEnv(t *testing.T) {
+	requireBinary(t, "/bin/sh")
 	t.Setenv("SHELL", "/bin/sh")
 	s, err := New("")
 	if err != nil {
@@ -62,6 +74,7 @@ func TestNew_FallsBackToShellEnv(t *testing.T) {
 }
 
 func TestNew_FallsBackToBinBashWhenShellUnset(t *testing.T) {
+	requireBinary(t, "/bin/bash")
 	t.Setenv("SHELL", "")
 	s, err := New("")
 	if err != nil {
@@ -75,6 +88,7 @@ func TestNew_FallsBackToBinBashWhenShellUnset(t *testing.T) {
 }
 
 func TestShell_WriteAndRead(t *testing.T) {
+	requireBinary(t, "/bin/sh")
 	s, err := New("/bin/sh")
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -98,6 +112,7 @@ func TestShell_WriteAndRead(t *testing.T) {
 }
 
 func TestShell_Resize(t *testing.T) {
+	requireBinary(t, "/bin/sh")
 	s, err := New("/bin/sh")
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -110,6 +125,7 @@ func TestShell_Resize(t *testing.T) {
 }
 
 func TestShell_CloseIsIdempotent(t *testing.T) {
+	requireBinary(t, "/bin/sh")
 	s, err := New("/bin/sh")
 	if err != nil {
 		t.Fatalf("New: %v", err)
