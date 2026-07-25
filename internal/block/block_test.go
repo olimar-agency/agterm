@@ -28,3 +28,17 @@ func TestPlainText_LegacyStripsOSCSequences(t *testing.T) {
 		t.Errorf("PlainText() = %q, want %q", got, want)
 	}
 }
+
+// TestPlainText_LegacyStripsBareControlChars guards the legacy fallback
+// against standalone C0 control bytes (BEL, backspace, ...) that some
+// program wrote to stdout directly, outside of any escape sequence — these
+// aren't renderable text and shouldn't reach the AI provider layer. '\n'
+// must survive since it's the line separator, not junk.
+func TestPlainText_LegacyStripsBareControlChars(t *testing.T) {
+	b := &Block{Output: "AB\x07\x08CD\nEF\n"}
+	got := b.PlainText()
+	want := "ABCD\nEF\n"
+	if got != want {
+		t.Errorf("PlainText() = %q, want %q", got, want)
+	}
+}

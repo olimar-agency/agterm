@@ -152,6 +152,33 @@ func TestParser_PlainTextParityWithLegacyStripping(t *testing.T) {
 	}
 }
 
+// TestParser_PlainTextStripsBareControlCharsFromCells guards the Cells path
+// (vt.Parser output) against standalone C0 control bytes (BEL, backspace,
+// ...) leaking into PlainText() as literal runes — these are marked
+// Width 0 ("not yet rendered") precisely so they don't belong in
+// AI-facing text, mirroring the legacy fallback's bareControlRE strip.
+func TestParser_PlainTextStripsBareControlCharsFromCells(t *testing.T) {
+	store := NewStore(10)
+	p := NewParser(store)
+	p.StartBlock("cmd", "/")
+	feed(p,
+		pty.Segment{Kind: pty.SegOutput, Data: []byte("AB\x07\x08CD\nEF\n")},
+		pty.Segment{Kind: pty.SegCommandEnd, ExitCode: 0},
+	)
+
+	b := store.All()[0]
+	if b.Cells == nil {
+		t.Fatal("expected Cells to be populated")
+	}
+	// Cells never carry a trailing empty row for a final "\n" (mirrors
+	// TestParser_PlainTextParityWithLegacyStripping's use of TrimRight).
+	got := b.PlainText()
+	want := "ABCD\nEF"
+	if got != want {
+		t.Errorf("PlainText() = %q, want %q", got, want)
+	}
+}
+
 // TestParser_OSC133BoundariesUnchangedWithVTParser confirms that feeding
 // SGR-colored output through the VT parser (now always active) does not
 // disturb block boundary detection: command, exit code and block count stay

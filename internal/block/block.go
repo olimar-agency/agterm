@@ -37,6 +37,13 @@ var ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-?]*[@-~]`)
 // blocks (Cells != nil); this mirrors that for the legacy fallback.
 var oscDCSRE = regexp.MustCompile(`\x1b[\]P^_].*?(\x07|\x1b\\)`)
 
+// bareControlRE matches standalone C0 control bytes and DEL that aren't
+// part of an escape sequence (e.g. a lone BEL or backspace some program
+// wrote to stdout directly) — everything vt.Parser marks Width 0 for the
+// same reason (agterm#6). '\n' (0x0A) is excluded: it's the line separator,
+// not junk to strip.
+var bareControlRE = regexp.MustCompile(`[\x00-\x09\x0B-\x1F\x7F]`)
+
 // PlainText is the only surface the AI Provider layer should read from a
 // Block — it is deterministic and strips all style/color information.
 // Truncation policy is the Provider's responsibility, applied to this
@@ -44,12 +51,18 @@ var oscDCSRE = regexp.MustCompile(`\x1b[\]P^_].*?(\x07|\x1b\\)`)
 func (b *Block) PlainText() string {
 	if b.Cells == nil {
 		s := ansiEscapeRE.ReplaceAllString(b.Output, "")
-		return oscDCSRE.ReplaceAllString(s, "")
+		s = oscDCSRE.ReplaceAllString(s, "")
+		return bareControlRE.ReplaceAllString(s, "")
 	}
 	rows := make([]string, len(b.Cells))
 	for i, row := range b.Cells {
 		var sb strings.Builder
 		for _, c := range row {
+			if c.Width == 0 {
+				// Control character (BEL, backspace, ...) — not a
+				// renderable rune; never leak it into AI-facing text.
+				continue
+			}
 			sb.WriteRune(c.Rune)
 		}
 		rows[i] = sb.String()
