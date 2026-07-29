@@ -131,6 +131,82 @@ func TestRenderCells_AppliesEachStyleAfterARunBoundary(t *testing.T) {
 	}
 }
 
+// TestRenderCells_ThreeOrMoreStyleTransitions covers the QA-requested case
+// (agterm#13 review) of more than one run boundary in a row — the run
+// boundary above only exercises a single transition (A -> BC).
+func TestRenderCells_ThreeOrMoreStyleTransitions(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
+	row := []vt.Cell{
+		{Rune: 'A', Style: vt.CellStyle{Fg: vt.ColorIndexed{Index: 1}}, Width: 1},
+		{Rune: 'B', Style: vt.CellStyle{Fg: vt.ColorIndexed{Index: 2}}, Width: 1},
+		{Rune: 'C', Style: vt.CellStyle{Fg: vt.ColorIndexed{Index: 3}}, Width: 1},
+		{Rune: 'D', Style: vt.CellStyle{Fg: vt.ColorIndexed{Index: 1}}, Width: 1}, // back to the first color
+	}
+	got := renderCells(row)
+
+	want := lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render("A") +
+		lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("B") +
+		lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("C") +
+		lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render("D")
+	if got != want {
+		t.Fatalf("expected 4 independent runs (no merging across the repeated color 1):\n got  %q\n want %q", got, want)
+	}
+}
+
+// TestRenderCells_UniformRowIsASingleRun confirms a row with one style
+// throughout produces exactly one lipgloss run (one pair of SGR codes), not
+// one per cell — the whole point of the run-grouping optimization.
+func TestRenderCells_UniformRowIsASingleRun(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
+	style := vt.CellStyle{Fg: vt.ColorIndexed{Index: 2}, Attributes: vt.AttrBold}
+	row := []vt.Cell{
+		{Rune: 'h', Style: style, Width: 1},
+		{Rune: 'e', Style: style, Width: 1},
+		{Rune: 'l', Style: style, Width: 1},
+		{Rune: 'l', Style: style, Width: 1},
+		{Rune: 'o', Style: style, Width: 1},
+	}
+	got := renderCells(row)
+	want := lipglossStyleFor(style).Render("hello")
+	if got != want {
+		t.Fatalf("expected the whole row wrapped as one run:\n got  %q\n want %q", got, want)
+	}
+	if n := strings.Count(got, "\x1b["); n != 2 {
+		t.Fatalf("expected exactly 2 SGR sequences (open + reset) for a single run, got %d in %q", n, got)
+	}
+}
+
+// TestRenderCells_BackgroundAndCombinedAttributes covers background color
+// plus multiple simultaneous attributes (bold, underline, reverse) — the
+// other tests in this file only exercise foreground color in isolation.
+func TestRenderCells_BackgroundAndCombinedAttributes(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
+	style := vt.CellStyle{
+		Fg:         vt.ColorIndexed{Index: 3},
+		Bg:         vt.ColorIndexed{Index: 4},
+		Attributes: vt.AttrBold | vt.AttrUnderline | vt.AttrReverse,
+	}
+	row := []vt.Cell{{Rune: 'x', Style: style, Width: 1}}
+	got := renderCells(row)
+	want := lipglossStyleFor(style).Render("x")
+	if got != want {
+		t.Fatalf("expected background+attributes to render via lipglossStyleFor:\n got  %q\n want %q", got, want)
+	}
+	// Sanity: a background was actually requested, distinct from foreground-only cases.
+	if !strings.Contains(got, "\x1b[") {
+		t.Fatalf("expected SGR codes to be present, got %q", got)
+	}
+}
+
 func TestRenderCells_EmptyRow(t *testing.T) {
 	if got := renderCells(nil); got != "" {
 		t.Fatalf("expected empty string for an empty row, got %q", got)
