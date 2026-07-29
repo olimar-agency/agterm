@@ -14,7 +14,16 @@ import (
 	"github.com/imattos78/agterm/internal/ai"
 	"github.com/imattos78/agterm/internal/block"
 	"github.com/imattos78/agterm/internal/config"
+	"github.com/imattos78/agterm/internal/history"
 	"github.com/imattos78/agterm/internal/pty"
+)
+
+// Compile-time assertions that the real production types still satisfy
+// shellIO/recorderIO — guards against fakeShell/fakeRecorder silently
+// drifting from the contract the real *pty.Shell/*history.Recorder expose.
+var (
+	_ shellIO    = (*pty.Shell)(nil)
+	_ recorderIO = (*history.Recorder)(nil)
 )
 
 // ── fakes ─────────────────────────────────────────────────────────────────────
@@ -188,6 +197,36 @@ func TestUpdate_KeyMsg_RunningWritesRawBytesToShell(t *testing.T) {
 	}
 	if sh.lastWrite() != "a" {
 		t.Fatalf("expected shell to receive %q, got %q", "a", sh.lastWrite())
+	}
+	if m.input.Value() != "" {
+		t.Fatalf("expected the command input to NOT receive the key while a command is running, got %q", m.input.Value())
+	}
+}
+
+func TestUpdate_KeyMsg_RunningCtrlCForwardsSIGINTByteWithoutQuitting(t *testing.T) {
+	sh := &fakeShell{}
+	m := newTestModel(sh, nil, nil)
+	m.running = true
+
+	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m = mustModel(t, tm)
+
+	if sh.lastWrite() != "\x03" {
+		t.Fatalf("expected shell to receive the raw SIGINT byte 0x03, got %q", sh.lastWrite())
+	}
+	if !m.running {
+		t.Fatalf("expected running to remain true — Ctrl+C while running targets the child process, not agterm")
+	}
+	if m.err != nil {
+		t.Fatalf("expected no error set, got %v", m.err)
+	}
+	if cmd != nil {
+		if _, ok := runCmd(cmd).(tea.QuitMsg); ok {
+			t.Fatalf("expected Ctrl+C while running NOT to quit agterm")
+		}
+	}
+	if sh.closed {
+		t.Fatalf("expected the shell to stay open — only the child process should see the SIGINT byte")
 	}
 }
 
@@ -569,6 +608,21 @@ func TestUpdate_CtrlC_QuitsFromCommandInput(t *testing.T) {
 	}
 }
 
+func TestUpdate_CtrlD_QuitsFromCommandInput(t *testing.T) {
+	sh := &fakeShell{}
+	rec := &fakeRecorder{}
+	m := newTestModel(sh, nil, rec)
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+
+	if !sh.closed || !rec.closed {
+		t.Fatalf("expected shutdown to close shell and recorder, shell=%v recorder=%v", sh.closed, rec.closed)
+	}
+	if _, ok := runCmd(cmd).(tea.QuitMsg); !ok {
+		t.Fatalf("expected returned cmd to resolve to tea.QuitMsg")
+	}
+}
+
 func TestUpdate_Enter_StartsCommandBlock(t *testing.T) {
 	sh := &fakeShell{}
 	m := newTestModel(sh, nil, nil)
@@ -627,7 +681,8 @@ func TestUpdate_Enter_WriteErrorShutsDownAndQuits(t *testing.T) {
 }
 
 func TestUpdate_Default_ForwardsKeysToCommandInput(t *testing.T) {
-	m := newTestModel(&fakeShell{}, nil, nil)
+	sh := &fakeShell{}
+	m := newTestModel(sh, nil, nil)
 	m.input.Focus()
 
 	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
@@ -635,6 +690,9 @@ func TestUpdate_Default_ForwardsKeysToCommandInput(t *testing.T) {
 
 	if m.input.Value() != "l" {
 		t.Fatalf("expected input to receive forwarded key, got %q", m.input.Value())
+	}
+	if len(sh.writes) != 0 {
+		t.Fatalf("expected the key NOT to be written to the shell while no command is running, got %v", sh.writes)
 	}
 }
 
