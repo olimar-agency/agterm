@@ -18,6 +18,45 @@ func TestCellRoundtripUTF8Multibyte(t *testing.T) {
 	}
 }
 
+func TestCellStyleEqual(t *testing.T) {
+	tests := []struct {
+		name string
+		a, b CellStyle
+		want bool
+	}{
+		{"both DefaultStyle", DefaultStyle(), DefaultStyle(), true},
+		{
+			"same ColorIndexed fg", CellStyle{Fg: ColorIndexed{Index: 2}}, CellStyle{Fg: ColorIndexed{Index: 2}}, true,
+		},
+		{
+			"different ColorIndexed fg", CellStyle{Fg: ColorIndexed{Index: 1}}, CellStyle{Fg: ColorIndexed{Index: 2}}, false,
+		},
+		{
+			"same ColorRGB bg", CellStyle{Bg: ColorRGB{R: 1, G: 2, B: 3}}, CellStyle{Bg: ColorRGB{R: 1, G: 2, B: 3}}, true,
+		},
+		{
+			"different Attributes", CellStyle{Attributes: AttrBold}, CellStyle{Attributes: AttrItalic}, false,
+		},
+		{
+			// A CellStyle built without DefaultStyle() leaves Fg/Bg as the
+			// nil interface value (not ColorDefault{}) — this must still
+			// compare equal to itself, not fall through colorEqual's type
+			// switch default case (regression: it did, until fixed).
+			"both nil Fg/Bg (literal without DefaultStyle)", CellStyle{}, CellStyle{}, true,
+		},
+		{
+			"nil Fg vs ColorDefault Fg are distinct representations", CellStyle{}, CellStyle{Fg: ColorDefault{}}, false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.a.Equal(tt.b); got != tt.want {
+				t.Errorf("Equal() = %v, want %v (a=%+v b=%+v)", got, tt.want, tt.a, tt.b)
+			}
+		})
+	}
+}
+
 // TestColorRGBAssignable exercises the forward-compatibility requirement from
 // the contract in #6: Phase 8 must be able to introduce ColorRGB without any
 // change to Cell or CellStyle.
