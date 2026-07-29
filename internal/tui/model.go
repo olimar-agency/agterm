@@ -29,11 +29,28 @@ type ptyMsg struct{ segs []ptyPkg.Segment }
 type errMsg struct{ err error }
 type aiChunkMsg ai.StreamResult
 
+// shellIO is the subset of *ptyPkg.Shell that Model depends on. Extracted
+// as an interface so tests can substitute an in-memory fake in place of a
+// real spawned PTY (see fakeShell in update_test.go).
+type shellIO interface {
+	Read(p []byte) (int, error)
+	Write(p []byte) (int, error)
+	Resize(rows, cols uint16) error
+	Close() error
+}
+
+// recorderIO is the subset of *history.Recorder that Model depends on,
+// extracted for the same reason as shellIO.
+type recorderIO interface {
+	Append(b *block.Block) error
+	Close() error
+}
+
 // ── Model ─────────────────────────────────────────────────────────────────────
 
 type Model struct {
 	// shell
-	shell    *ptyPkg.Shell
+	shell    shellIO
 	detector *ptyPkg.Detector
 	parser   *block.Parser
 	store    *block.Store
@@ -55,7 +72,7 @@ type Model struct {
 	suggestedCmd string // non-empty when AI has proposed a command
 
 	// history
-	recorder *history.Recorder
+	recorder recorderIO
 
 	autoRunReadonly bool
 
