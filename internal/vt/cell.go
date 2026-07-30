@@ -51,6 +51,42 @@ func DefaultStyle() CellStyle {
 	return CellStyle{Fg: ColorDefault{}, Bg: ColorDefault{}}
 }
 
+// Equal reports whether two CellStyles render identically. Defined
+// explicitly rather than relying on == against the Fg/Bg interface fields:
+// every Color variant today (ColorDefault, ColorIndexed, ColorRGB) happens
+// to be comparable, but Color is sealed specifically so future variants
+// (e.g. Phase 8) can be added — a variant carrying a non-comparable field
+// would make == panic. colorEqual switches on the known concrete types
+// instead, so an unrecognized variant fails safe (not equal) rather than
+// panicking.
+func (s CellStyle) Equal(other CellStyle) bool {
+	return colorEqual(s.Fg, other.Fg) && colorEqual(s.Bg, other.Bg) && s.Attributes == other.Attributes
+}
+
+func colorEqual(a, b Color) bool {
+	if a == nil || b == nil {
+		// A CellStyle built without DefaultStyle() (e.g. a struct literal
+		// that only sets Fg) leaves Fg/Bg as the nil interface value, not
+		// ColorDefault{}. Compare directly so two such nils are equal —
+		// falling through to the type switch below would hit `default`
+		// (nil matches no concrete case) and wrongly report "not equal".
+		return a == b
+	}
+	switch av := a.(type) {
+	case ColorDefault:
+		_, ok := b.(ColorDefault)
+		return ok
+	case ColorIndexed:
+		bv, ok := b.(ColorIndexed)
+		return ok && av == bv
+	case ColorRGB:
+		bv, ok := b.(ColorRGB)
+		return ok && av == bv
+	default:
+		return false
+	}
+}
+
 // Cell is the minimal renderable unit produced by Parser.Feed.
 type Cell struct {
 	Rune  rune

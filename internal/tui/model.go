@@ -588,20 +588,43 @@ func blockLines(b *block.Block, width int) []string {
 	}
 	header := left + strings.Repeat(" ", pad) + right
 
-	if b.Output == "" {
+	lines := styledOutputLines(b)
+	if len(lines) == 0 {
 		return []string{header}
 	}
-	out := strings.TrimRight(b.Output, "\n")
-	return append([]string{header}, strings.Split(outputStyle.Render(out), "\n")...)
+	return append([]string{header}, lines...)
 }
 
 func activeLines(b *block.Block, _ int) []string {
 	header := promptStyle.Render("❯ ") + cmdStyle.Render(b.Command) + " " + dimStyle.Render("…")
-	if b.Output == "" {
+	lines := styledOutputLines(b)
+	if len(lines) == 0 {
 		return []string{header}
 	}
-	out := strings.TrimRight(b.Output, "\n")
-	return append([]string{header}, strings.Split(outputStyle.Render(out), "\n")...)
+	return append([]string{header}, lines...)
+}
+
+// styledOutputLines renders a block's captured output as display lines,
+// preferring the styled Cells grid (real ANSI colors from the Phase 6
+// parser) and falling back to the legacy flat, stripped PlainText() for
+// blocks with no Cells — e.g. loaded from history, which persists Output
+// only (agterm#6).
+func styledOutputLines(b *block.Block) []string {
+	if b.Cells != nil {
+		if len(b.Cells) == 0 {
+			return nil
+		}
+		lines := make([]string, len(b.Cells))
+		for i, row := range b.Cells {
+			lines[i] = "  " + renderCells(row)
+		}
+		return lines
+	}
+	out := strings.TrimRight(b.PlainText(), "\n")
+	if out == "" {
+		return nil
+	}
+	return strings.Split(outputStyle.Render(out), "\n")
 }
 
 // ── key translation ───────────────────────────────────────────────────────────
