@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -575,6 +576,196 @@ func TestUpdate_AIPanel_StreamingIgnoresInputKeys(t *testing.T) {
 }
 
 // ── command input (AI panel closed) ──────────────────────────────────────────
+
+// ── scrollback (Phase 7) ─────────────────────────────────────────────────────
+
+// fillStore adds n single-line blocks (command header only, no output) to
+// m's store, giving flattenLines() exactly n lines to page through.
+func fillStore(m *Model, n int) {
+	for i := 0; i < n; i++ {
+		m.parser.StartBlock(fmt.Sprintf("cmd%d", i), "")
+		m.store.Add(m.parser.Active())
+	}
+}
+
+func TestUpdate_PgUpPgDown_ScrollsBlockListAndReturnsToBottom(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	fillStore(&m, 100) // well beyond blockHeight() so paging has room to move
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+	if m.viewport.AtBottom() {
+		t.Fatalf("expected PgUp to scroll away from the bottom")
+	}
+	if !strings.Contains(m.View(), "scrolled") {
+		t.Fatalf("expected View() to show the scroll indicator once scrolled")
+	}
+
+	// Enough PgDowns to certainly land back at (or floor to) the bottom.
+	for i := 0; i < 5; i++ {
+		tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+		m = mustModel(t, tm)
+	}
+	if !m.viewport.AtBottom() {
+		t.Fatalf("expected repeated PgDown to floor back at the bottom")
+	}
+	if strings.Contains(m.View(), "scrolled") {
+		t.Fatalf("expected View() to hide the scroll indicator once back at the bottom")
+	}
+}
+
+func TestUpdate_CtrlU_EditsCommandInputWhenAtBottom(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	m.input.SetValue("hello")
+	m.input.CursorEnd()
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	m = mustModel(t, tm)
+
+	if m.input.Value() != "" {
+		t.Fatalf("expected ctrl+u to delete-before-cursor in the command input, got %q", m.input.Value())
+	}
+	if !m.viewport.AtBottom() {
+		t.Fatalf("expected ctrl+u to leave the viewport untouched while at bottom")
+	}
+}
+
+func TestUpdate_CtrlU_ScrollsInsteadOfEditingOnceScrolled(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	fillStore(&m, 100)
+	m.input.SetValue("hello")
+	m.input.CursorEnd()
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+	offsetAfterPgUp := m.viewport.offset
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	m = mustModel(t, tm)
+
+	if m.input.Value() != "hello" {
+		t.Fatalf("expected ctrl+u to leave the command input untouched once scrolled, got %q", m.input.Value())
+	}
+	if m.viewport.offset <= offsetAfterPgUp {
+		t.Fatalf("expected ctrl+u to scroll further up once already scrolled: before=%d after=%d", offsetAfterPgUp, m.viewport.offset)
+	}
+}
+
+func TestUpdate_CtrlD_QuitsWhenAtBottom(t *testing.T) {
+	sh := &fakeShell{}
+	m := newTestModel(sh, nil, nil)
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+
+	if !sh.closed {
+		t.Fatalf("expected ctrl+d to shut down when at bottom (EOF convention)")
+	}
+	if _, ok := runCmd(cmd).(tea.QuitMsg); !ok {
+		t.Fatalf("expected returned cmd to resolve to tea.QuitMsg")
+	}
+}
+
+func TestUpdate_CtrlD_ScrollsDownInsteadOfQuittingOnceScrolled(t *testing.T) {
+	sh := &fakeShell{}
+	m := newTestModel(sh, nil, nil)
+	fillStore(&m, 100)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+	offsetAfterPgUp := m.viewport.offset
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	m = mustModel(t, tm)
+
+	if sh.closed {
+		t.Fatalf("expected ctrl+d NOT to shut down the shell once scrolled")
+	}
+	if m.viewport.offset >= offsetAfterPgUp {
+		t.Fatalf("expected ctrl+d to scroll back down once already scrolled: before=%d after=%d", offsetAfterPgUp, m.viewport.offset)
+	}
+}
+
+func TestUpdate_Home_MovesInputCursorWhenAtBottom(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	m.input.SetValue("hello")
+	m.input.CursorEnd()
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyHome})
+	m = mustModel(t, tm)
+
+	if m.input.Position() != 0 {
+		t.Fatalf("expected home to move the command input cursor to 0, got %d", m.input.Position())
+	}
+	if !m.viewport.AtBottom() {
+		t.Fatalf("expected home to leave the viewport untouched while at bottom")
+	}
+}
+
+func TestUpdate_Home_JumpsToTopOnceScrolled(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	fillStore(&m, 100)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyHome})
+	m = mustModel(t, tm)
+
+	if !strings.Contains(m.View(), "cmd0") {
+		t.Fatalf("expected home to jump all the way back to the earliest block, view:\n%s", m.View())
+	}
+}
+
+func TestUpdate_End_JumpsToBottomOnceScrolled(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	fillStore(&m, 100)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+	if m.viewport.AtBottom() {
+		t.Fatalf("test setup broken: expected to be scrolled up before pressing End")
+	}
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	m = mustModel(t, tm)
+
+	if !m.viewport.AtBottom() {
+		t.Fatalf("expected end to re-engage sticky-bottom")
+	}
+}
+
+func TestUpdate_Esc_JumpsToBottomOnceScrolled(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	fillStore(&m, 100)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = mustModel(t, tm)
+
+	if !m.viewport.AtBottom() {
+		t.Fatalf("expected esc to re-engage sticky-bottom as an escape hatch")
+	}
+}
+
+func TestUpdate_PtyMsg_PreservesScrollAnchorAsNewOutputArrives(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	fillStore(&m, 100)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+	viewBefore := m.View()
+
+	// A ptyMsg with no segments still runs through the growth-tracking path
+	// (Viewport.Note); the rendered window must not move.
+	tm, _ = m.Update(ptyMsg{})
+	m = mustModel(t, tm)
+
+	if m.View() != viewBefore {
+		t.Fatalf("expected the scrolled view to stay anchored across an unrelated ptyMsg\nbefore:\n%s\nafter:\n%s", viewBefore, m.View())
+	}
+}
 
 func TestUpdate_CtrlA_OpensAIPanel(t *testing.T) {
 	m := newTestModel(&fakeShell{}, nil, nil)
