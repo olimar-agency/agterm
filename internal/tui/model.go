@@ -426,7 +426,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// down" — same convention adopted for Ctrl+U below. Ctrl+C
 			// remains an unconditional quit regardless of scroll state.
 			if !m.viewport.AtBottom() {
-				m.syncViewport()
 				m.viewport.HalfDown(m.blockHeight())
 			} else {
 				m.shutdown()
@@ -438,8 +437,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// (real shell muscle memory), so only steal it for scrolling
 			// once already scrolled up — otherwise let it edit the command.
 			if !m.viewport.AtBottom() {
-				m.syncViewport()
-				m.viewport.HalfUp(m.blockHeight())
+				total := m.syncViewport()
+				m.viewport.HalfUp(total, m.blockHeight())
 			} else {
 				var tiCmd tea.Cmd
 				m.input, tiCmd = m.input.Update(msg)
@@ -450,8 +449,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Bubbles' textinput binds home to "cursor to line start", so
 			// same rule as ctrl+u: only repurpose once already scrolled.
 			if !m.viewport.AtBottom() {
-				m.syncViewport()
-				m.viewport.JumpTop()
+				total := m.syncViewport()
+				m.viewport.JumpTop(total, m.blockHeight())
 			} else {
 				var tiCmd tea.Cmd
 				m.input, tiCmd = m.input.Update(msg)
@@ -481,8 +480,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case tea.KeyPgUp:
-			m.syncViewport()
-			m.viewport.PageUp(m.blockHeight())
+			total := m.syncViewport()
+			m.viewport.PageUp(total, m.blockHeight())
 
 		case tea.KeyPgDown:
 			m.viewport.PageDown(m.blockHeight())
@@ -549,14 +548,18 @@ func (m Model) flattenLines() []string {
 }
 
 // syncViewport resyncs the scroll growth baseline (see Viewport.Note) from
-// the current history. Call it before any Update() action that mutates the
+// the current history and returns the total line count, so callers can
+// feed the same value straight into PageUp/HalfUp/JumpTop's clamp without
+// re-flattening. Call it before any Update() action that mutates the
 // offset — the ptyMsg handler (the only event that appends to history) and
 // every scroll-away-from-bottom key — so the next growth check never sees
 // a stale lastTotal. Centralized here as the single call site: OCR flagged
 // the same len(m.flattenLines()) + Note() pair repeated across five
 // branches as an easy-to-forget invariant for future scroll keys to miss.
-func (m *Model) syncViewport() {
-	m.viewport.Note(len(m.flattenLines()))
+func (m *Model) syncViewport() int {
+	total := len(m.flattenLines())
+	m.viewport.Note(total)
+	return total
 }
 
 // blockHeight computes how many lines are available for the block-list

@@ -39,9 +39,21 @@ func TestViewport_Slice_PadsWhenNotEnoughHistory(t *testing.T) {
 
 func TestViewport_PageUp_MovesByViewportMinusOneWithOverlap(t *testing.T) {
 	v := Viewport{offset: 0}
-	v.PageUp(5) // viewportH-1 = 4
+	v.PageUp(100, 5) // viewportH-1 = 4, plenty of totalLines to not clamp
 	if v.offset != 4 {
 		t.Fatalf("offset = %d, want 4 (page size with 1-line overlap)", v.offset)
+	}
+}
+
+func TestViewport_PageUp_ClampsImmediatelyAgainstTotalLines(t *testing.T) {
+	// AtBottom() reports the raw offset field directly, so PageUp must not
+	// leave a "phantom" unclamped offset even when there's nothing to
+	// scroll into — otherwise an empty or near-empty buffer would report
+	// scrolled (and show the scroll indicator) after a single PageUp.
+	v := Viewport{offset: 0}
+	v.PageUp(0, 23) // empty buffer
+	if !v.AtBottom() {
+		t.Fatalf("offset = %d, want 0: PageUp on an empty buffer has nothing to scroll into", v.offset)
 	}
 }
 
@@ -58,7 +70,7 @@ func TestViewport_PageDown_FloorsAtZero(t *testing.T) {
 
 func TestViewport_HalfUp_HalfDown(t *testing.T) {
 	v := Viewport{offset: 0}
-	v.HalfUp(9) // 9/2 = 4
+	v.HalfUp(100, 9) // 9/2 = 4
 	if v.offset != 4 {
 		t.Fatalf("offset after HalfUp = %d, want 4", v.offset)
 	}
@@ -68,9 +80,21 @@ func TestViewport_HalfUp_HalfDown(t *testing.T) {
 	}
 }
 
+func TestViewport_HalfUp_HalfDown_EvenHeight(t *testing.T) {
+	v := Viewport{offset: 0}
+	v.HalfUp(100, 10) // 10/2 = 5, no odd-height rounding to worry about
+	if v.offset != 5 {
+		t.Fatalf("offset after HalfUp(10) = %d, want 5", v.offset)
+	}
+	v.HalfDown(10)
+	if v.offset != 0 {
+		t.Fatalf("offset after HalfDown(10) = %d, want 0", v.offset)
+	}
+}
+
 func TestViewport_HalfStep_MinimumOfOne(t *testing.T) {
 	v := Viewport{offset: 0}
-	v.HalfUp(1) // 1/2 = 0, must floor to at least 1 to make progress
+	v.HalfUp(100, 1) // 1/2 = 0, must floor to at least 1 to make progress
 	if v.offset != 1 {
 		t.Fatalf("offset = %d, want 1 (half-step must never be zero)", v.offset)
 	}
@@ -78,11 +102,27 @@ func TestViewport_HalfStep_MinimumOfOne(t *testing.T) {
 
 func TestViewport_JumpTop_ClampsToEarliestFullPage(t *testing.T) {
 	v := Viewport{}
-	v.JumpTop()
+	v.JumpTop(10, 4)
 	got := v.Slice(linesN(10), 4)
 	want := []string{"L0", "L1", "L2", "L3"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Slice() after JumpTop = %v, want %v", got, want)
+	}
+}
+
+func TestViewport_JumpTop_EmptyAndSingleLineBuffers(t *testing.T) {
+	var v Viewport
+	v.JumpTop(0, 4)
+	if got := v.Slice(linesN(0), 4); !reflect.DeepEqual(got, []string{"", "", "", ""}) {
+		t.Fatalf("Slice() on empty buffer after JumpTop = %v, want all blank", got)
+	}
+
+	v = Viewport{}
+	v.JumpTop(1, 4)
+	got := v.Slice(linesN(1), 4)
+	want := []string{"", "", "", "L0"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Slice() on single-line buffer after JumpTop = %v, want %v", got, want)
 	}
 }
 
@@ -117,6 +157,24 @@ func TestViewport_Clamp_DoesNotMutateReceiver(t *testing.T) {
 	}
 }
 
+func TestViewport_AboveBottom(t *testing.T) {
+	var v Viewport
+	if got := v.AboveBottom(100, 10); got != 0 {
+		t.Fatalf("AboveBottom() at bottom = %d, want 0", got)
+	}
+
+	v.PageUp(100, 10) // offset = 9
+	if got := v.AboveBottom(100, 10); got != 9 {
+		t.Fatalf("AboveBottom() after PageUp = %d, want 9", got)
+	}
+
+	// Must reflect the same clamp Slice() applies, not the raw offset.
+	v = Viewport{offset: 1000}
+	if got := v.AboveBottom(20, 10); got != 10 {
+		t.Fatalf("AboveBottom() with oversized offset = %d, want clamped to 10", got)
+	}
+}
+
 func TestViewport_Note_NoOpWhenAtBottom(t *testing.T) {
 	var v Viewport
 	v.Note(10)
@@ -129,8 +187,8 @@ func TestViewport_Note_NoOpWhenAtBottom(t *testing.T) {
 func TestViewport_Note_GrowsOffsetToKeepAbsoluteAnchorWhileScrolled(t *testing.T) {
 	all := linesN(20)
 	v := Viewport{}
-	v.Note(len(all)) // baseline total before scrolling
-	v.PageUp(5)       // offset = 4
+	v.Note(len(all))     // baseline total before scrolling
+	v.PageUp(len(all), 5) // offset = 4
 
 	before := v.Slice(all, 5)
 
@@ -166,7 +224,7 @@ func TestViewport_Slice_ZeroHeightReturnsNil(t *testing.T) {
 
 func TestViewport_PageStep_MinimumOfOne(t *testing.T) {
 	v := Viewport{offset: 0}
-	v.PageUp(1) // 1-1 = 0, must floor to at least 1 to make progress
+	v.PageUp(100, 1) // 1-1 = 0, must floor to at least 1 to make progress
 	if v.offset != 1 {
 		t.Fatalf("offset = %d, want 1 (page-step must never be zero)", v.offset)
 	}
@@ -177,7 +235,7 @@ func TestViewport_Note_ThenClampHandlesEvictionGracefully(t *testing.T) {
 	// without panicking even if a Store eviction happens between them.
 	v := Viewport{}
 	v.Note(500)
-	v.PageUp(10)
+	v.PageUp(500, 10)
 	v.Note(3) // buffer shrank drastically (eviction), fewer lines than offset
 	got := v.Slice(linesN(3), 10)
 	if len(got) != 10 {

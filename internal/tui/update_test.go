@@ -11,6 +11,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/imattos78/agterm/internal/ai"
 	"github.com/imattos78/agterm/internal/block"
@@ -767,6 +768,221 @@ func TestUpdate_PtyMsg_PreservesScrollAnchorAsNewOutputArrives(t *testing.T) {
 	}
 }
 
+func TestUpdate_CtrlC_QuitsEvenWhileScrolled(t *testing.T) {
+	sh := &fakeShell{}
+	m := newTestModel(sh, nil, nil)
+	fillStore(&m, 100)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+	if m.viewport.AtBottom() {
+		t.Fatalf("test setup broken: expected to be scrolled up before ctrl+c")
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+
+	if !sh.closed {
+		t.Fatalf("expected ctrl+c to quit unconditionally even while scrolled")
+	}
+	if _, ok := runCmd(cmd).(tea.QuitMsg); !ok {
+		t.Fatalf("expected returned cmd to resolve to tea.QuitMsg")
+	}
+}
+
+// scrollIndicatorLine returns the indicator row m expects in its own View()
+// output (content is exactly m.blockHeight() lines, the indicator is the
+// next one — see View()'s parts ordering). Positional, not a substring
+// search, because at extreme widths MaxWidth can truncate mid-word (e.g.
+// "scrolled" -> "scrolle"), which would make a text-match unreliable.
+func scrollIndicatorLine(t *testing.T, m Model) string {
+	t.Helper()
+	if m.viewport.AtBottom() {
+		t.Fatalf("no scroll indicator is rendered while at bottom")
+	}
+	lines := strings.Split(m.View(), "\n")
+	i := m.blockHeight()
+	if i >= len(lines) {
+		t.Fatalf("expected an indicator line at index %d, only got %d lines:\n%s", i, len(lines), m.View())
+	}
+	return lines[i]
+}
+
+func TestUpdate_ScrollIndicator_ShowsCorrectLineCount(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	fillStore(&m, 100)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+
+	wantAbove := m.viewport.AboveBottom(len(m.flattenLines()), m.blockHeight())
+	if !strings.Contains(scrollIndicatorLine(t, m), fmt.Sprintf("%d lines", wantAbove)) {
+		t.Fatalf("expected indicator to report %d lines, view:\n%s", wantAbove, m.View())
+	}
+}
+
+func TestUpdate_ScrollIndicator_CapsWidthOnNarrowTerminal(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	m.width = 10 // narrower than the indicator text itself
+	fillStore(&m, 100)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+
+	// Block-list content lines are a separate, pre-existing concern
+	// (blockLines' own padding can already exceed very narrow widths) —
+	// only the indicator this PR adds needs to respect m.width here.
+	indicatorLine := scrollIndicatorLine(t, m)
+	if got := lipgloss.Width(indicatorLine); got > m.width {
+		t.Fatalf("indicator line exceeds terminal width %d: %q (width %d)", m.width, indicatorLine, got)
+	}
+}
+
+func TestUpdate_WindowSizeMsg_WhileScrolled_ReclampsInsteadOfResetting(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	fillStore(&m, 100)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+	offsetBefore := m.viewport.offset
+
+	// Grow the terminal — plenty of room, offset should NOT reset to 0.
+	tm, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 60})
+	m = mustModel(t, tm)
+
+	if m.viewport.AtBottom() {
+		t.Fatalf("expected offset to survive a height resize, got reset to bottom")
+	}
+	if m.viewport.offset != offsetBefore {
+		t.Fatalf("expected raw offset unchanged by a height resize alone: before=%d after=%d", offsetBefore, m.viewport.offset)
+	}
+
+	// Shrink drastically — offset must reclamp without panicking or going negative.
+	tm, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 3})
+	m = mustModel(t, tm)
+	_ = m.View() // must not panic
+}
+
+func TestUpdate_WindowSizeMsg_WhileScrolled_NarrowWidthDoesNotPanic(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	fillStore(&m, 100)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+
+	// Documented, accepted limitation: width resize may drift the scroll
+	// position (no Cell-anchoring in this slice). It must not panic.
+	tm, _ = m.Update(tea.WindowSizeMsg{Width: 5, Height: 24})
+	m = mustModel(t, tm)
+	_ = m.View()
+}
+
+func TestUpdate_PgUp_ScrollsWithinASingleBlockLargerThanTheViewport(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	m.parser.StartBlock("cmd0", "")
+	active := m.parser.Active()
+	for i := 0; i < 200; i++ {
+		active.Output += fmt.Sprintf("line%d\n", i)
+	}
+	m.store.Add(active)
+	// Close the block out of "active" state — it's now a single completed
+	// Block in the Store whose own output (201 lines) outgrows the
+	// viewport by itself, proving scroll is line-granular, not block-
+	// granular (a Block-level scroll couldn't page into this at all).
+	m.parser = block.NewParser(m.store)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+	if m.viewport.AtBottom() {
+		t.Fatalf("expected PgUp to scroll within a single oversized block")
+	}
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyHome})
+	m = mustModel(t, tm)
+	if !strings.Contains(m.View(), "line0") {
+		t.Fatalf("expected Home to reach the start of the oversized block's own output, view:\n%s", m.View())
+	}
+}
+
+func TestUpdate_PgUp_EmptyBufferDoesNotPanicOrMoveOffset(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+
+	if !m.viewport.AtBottom() {
+		t.Fatalf("expected PgUp on an empty buffer to leave the viewport at bottom (nothing to scroll into), offset=%d", m.viewport.offset)
+	}
+	_ = m.View() // must not panic
+}
+
+func TestUpdate_PtyMsg_StoreEvictionWhileScrolledDoesNotPanic(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	fillStore(&m, 500) // at the Store's cap (block.NewStore(500) in newTestModel)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+	if m.viewport.AtBottom() {
+		t.Fatalf("test setup broken: expected to be scrolled up before eviction")
+	}
+
+	// Pushes the Store past its cap, evicting the oldest blocks — exercises
+	// syncViewport()/Clamp with a total that can now shrink from the front.
+	fillStore(&m, 50)
+
+	tm, _ = m.Update(ptyMsg{})
+	m = mustModel(t, tm)
+	_ = m.View() // must not panic, offset must not go invalid
+	if m.viewport.offset < 0 {
+		t.Fatalf("offset went negative after eviction: %d", m.viewport.offset)
+	}
+}
+
+func TestUpdate_TinyTerminalHeight_DoesNotPanic(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	fillStore(&m, 20)
+	m.height = 1
+	m.width = 20
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+	if m.blockHeight() < 1 {
+		t.Fatalf("blockHeight() = %d, want >= 1 even on a 1-row terminal", m.blockHeight())
+	}
+	_ = m.View() // must not panic
+}
+
+// TestTextinputKeymapAssumptions locks in the Bubbles textinput behavior the
+// scroll-vs-edit gating in Update() depends on: ctrl+u/home edit the command
+// line, esc is a no-op. If a future bubbles bump changes any of these, this
+// fails loudly instead of the offset==0 gating silently breaking underneath
+// PageUp/Ctrl+U/Home/Esc.
+func TestTextinputKeymapAssumptions(t *testing.T) {
+	fresh := func() textinput.Model {
+		ti := textinput.New()
+		ti.Focus()
+		ti.SetValue("hello")
+		ti.CursorEnd()
+		return ti
+	}
+
+	ti, _ := fresh().Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	if ti.Value() != "" {
+		t.Fatalf("assumption broken: ctrl+u no longer deletes before cursor in textinput, got %q", ti.Value())
+	}
+
+	ti, _ = fresh().Update(tea.KeyMsg{Type: tea.KeyHome})
+	if ti.Position() != 0 {
+		t.Fatalf("assumption broken: home no longer moves the cursor to line start in textinput, got position %d", ti.Position())
+	}
+
+	before := fresh()
+	after, _ := before.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if after.Value() != before.Value() || after.Position() != before.Position() {
+		t.Fatalf("assumption broken: esc now mutates textinput (value=%q pos=%d, want value=%q pos=%d) — the Esc-jumps-to-bottom gating in Update() needs revisiting",
+			after.Value(), after.Position(), before.Value(), before.Position())
+	}
+}
+
 func TestUpdate_CtrlA_OpensAIPanel(t *testing.T) {
 	m := newTestModel(&fakeShell{}, nil, nil)
 	m.input.Focus()
@@ -1040,5 +1256,47 @@ func TestRenderAIPanel_SuggestionBarHiddenWhileStreaming(t *testing.T) {
 	out := m.renderAIPanel()
 	if strings.Contains(out, "Tab to run") {
 		t.Fatalf("expected suggestion bar to be hidden while streaming, got %q", out)
+	}
+}
+
+// TestUpdate_CtrlD_ThenPtyMsg_StillPreservesAnchor is a regression probe
+// for an OCR finding claiming HalfDown (Ctrl+D while scrolled) needs its
+// own syncViewport() call because it can leave offset > 0 without
+// resyncing lastTotal. That's only a real problem if totalLines can drift
+// without going through ptyMsg (the only place lines are appended), and
+// ptyMsg always calls syncViewport() itself — so HalfDown/PageDown (which
+// never change totalLines, only the viewing position) shouldn't need it.
+// This proves it empirically rather than by argument alone.
+func TestUpdate_CtrlD_ThenPtyMsg_StillPreservesAnchor(t *testing.T) {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	fillStore(&m, 100)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = mustModel(t, tm)
+	if m.viewport.AtBottom() {
+		t.Fatalf("test setup broken: expected scrolled after PgUp")
+	}
+
+	// Ctrl+D/HalfDown while scrolled — leaves offset > 0 (half-page from a
+	// full page up), no syncViewport() call on this path.
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	m = mustModel(t, tm)
+	if m.viewport.AtBottom() {
+		t.Fatalf("test setup broken: expected still scrolled after a single HalfDown from a PageUp")
+	}
+	// Compare only the visible content lines, not the full View() — the
+	// indicator's own "N lines" text is *expected* to grow as new output
+	// appends below an anchored position, that's not drift.
+	contentBefore := strings.Join(m.viewport.Slice(m.flattenLines(), m.blockHeight()), "\n")
+
+	// New output streams in — the same anchor-preservation ptyMsg exercises
+	// elsewhere, but now with a HalfDown in between the last sync and here.
+	fillStore(&m, 5)
+	tm, _ = m.Update(ptyMsg{})
+	m = mustModel(t, tm)
+	contentAfter := strings.Join(m.viewport.Slice(m.flattenLines(), m.blockHeight()), "\n")
+
+	if contentAfter != contentBefore {
+		t.Fatalf("visible content drifted after Ctrl+D then new output, despite no growth having occurred at HalfDown time\nbefore:\n%s\nafter:\n%s", contentBefore, contentAfter)
 	}
 }

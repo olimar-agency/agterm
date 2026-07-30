@@ -1,7 +1,5 @@
 package tui
 
-import "math"
-
 // Viewport tracks how far the block-list panel is scrolled up from the
 // bottom of the flattened line history that View() renders. offset is the
 // number of lines above the live tail the view is currently positioned at;
@@ -11,10 +9,22 @@ import "math"
 // State-mutating methods (PageUp, PageDown, HalfUp, HalfDown, JumpTop,
 // JumpBottom, Note) use a pointer receiver and must only be called from
 // Update(), whose returned value-receiver Model is what Bubbletea persists.
-// Slice and AtBottom use a value receiver deliberately: View() also has a
-// value-receiver Model, so any mutation performed there would be silently
-// discarded when the render returns — Slice reads the current offset and
-// projects a window without needing to persist anything back.
+// PageUp/HalfUp/JumpTop — the "move away from bottom" operations — take
+// totalLines so they can clamp offset immediately: AtBottom() reports the
+// raw offset field directly (not a render-time projection of it), so an
+// unclamped offset would report "scrolled" even when there's nothing to
+// scroll into (e.g. PageUp on an empty buffer) and Slice() would render an
+// indistinguishable-from-bottom view under a spurious "scrolled" indicator.
+//
+// Slice, AtBottom, AboveBottom use a value receiver deliberately: View()
+// also has a value-receiver Model, so any mutation performed there would
+// be silently discarded when the render returns — these read the current
+// offset and project a result without needing to persist anything back.
+// They still defensively re-clamp against whatever totalLines/viewportH
+// are current at call time (which can differ from what a mutator saw —
+// e.g. the AI panel toggling blockH, or a Store eviction, with no
+// intervening scroll keypress), so an offset that was valid when set stays
+// valid to render even if the world moved under it.
 type Viewport struct {
 	offset    int
 	lastTotal int
@@ -23,26 +33,56 @@ type Viewport struct {
 // AtBottom reports whether the view is pinned to the live tail.
 func (v Viewport) AtBottom() bool { return v.offset == 0 }
 
-// PageUp/PageDown move by a full page with a 1-line overlap so a page flip
-// doesn't lose context. HalfUp/HalfDown move by half a page.
-func (v *Viewport) PageUp(viewportH int)   { v.offset += pageStep(viewportH) }
+// PageUp scrolls up by a full page (with a 1-line overlap so a page flip
+// doesn't lose context), clamped to what totalLines/viewportH allow.
+func (v *Viewport) PageUp(totalLines, viewportH int) {
+	v.offset += pageStep(viewportH)
+	v.clampInPlace(totalLines, viewportH)
+}
+
+// HalfUp scrolls up by half a page, clamped like PageUp.
+func (v *Viewport) HalfUp(totalLines, viewportH int) {
+	v.offset += halfStep(viewportH)
+	v.clampInPlace(totalLines, viewportH)
+}
+
+// PageDown/HalfDown move back toward the bottom. They never need a
+// totalLines-aware clamp: moving toward 0 can't overshoot past valid
+// range, only below it, which floor() already guards.
 func (v *Viewport) PageDown(viewportH int) { v.offset -= pageStep(viewportH); v.floor() }
-func (v *Viewport) HalfUp(viewportH int)   { v.offset += halfStep(viewportH) }
 func (v *Viewport) HalfDown(viewportH int) { v.offset -= halfStep(viewportH); v.floor() }
 
 // JumpBottom re-engages sticky-bottom auto-follow.
 func (v *Viewport) JumpBottom() { v.offset = 0 }
 
-// JumpTop scrolls as far back as the current history allows. The exact
-// bound depends on total line count and viewport height, both only known
-// at render time, so this sets an oversized offset that Slice's own
-// clamping brings back into range on the next render.
-func (v *Viewport) JumpTop() { v.offset = math.MaxInt }
+// JumpTop scrolls as far back as totalLines/viewportH allow.
+func (v *Viewport) JumpTop(totalLines, viewportH int) {
+	v.offset = totalLines
+	v.clampInPlace(totalLines, viewportH)
+}
 
 func (v *Viewport) floor() {
 	if v.offset < 0 {
 		v.offset = 0
 	}
+}
+
+// clampInPlace bounds offset to [0, totalLines-viewportH] and persists the
+// result — used by the mutators above, which run only from Update() where
+// persisting matters. The value-receiver clamp() further down serves a
+// different purpose: it re-projects an offset that may have gone stale
+// due to a state change with no accompanying mutator call (e.g. the AI
+// panel toggling blockHeight, or a Store eviction), on every read, without
+// ever touching a value-receiver Model's persisted state.
+func (v *Viewport) clampInPlace(totalLines, viewportH int) {
+	max := totalLines - viewportH
+	if max < 0 {
+		max = 0
+	}
+	if v.offset > max {
+		v.offset = max
+	}
+	v.floor()
 }
 
 // Note records the current total flattened line count so growth while
