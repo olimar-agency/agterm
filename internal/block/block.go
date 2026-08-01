@@ -70,6 +70,32 @@ func (b *Block) PlainText() string {
 	return strings.Join(rows, "\n")
 }
 
+// SemanticText returns PlainText's content with spans the terminal styled
+// as errors wrapped in «error: ...» markers — an opt-in surface alongside
+// PlainText for the AI context builder (agterm#16). PlainText itself is
+// untouched and remains the canonical, style-free surface.
+//
+// Falls back to PlainText() when Cells is nil (e.g. a block loaded from
+// history, which persists Output only, not Cells — agterm#6): there is no
+// color information left to classify, so no annotation is possible.
+func (b *Block) SemanticText() string {
+	if b.Cells == nil {
+		return b.PlainText()
+	}
+	return vt.Annotate(b.Cells)
+}
+
+// ErrorLineCount returns the number of lines containing at least one cell
+// classified as semantic "error" (agterm#16) — used to extend the AI
+// auto-trigger beyond exit-code-only. 0 when Cells is nil: no color
+// information survives for a block loaded from history.
+func (b *Block) ErrorLineCount() int {
+	if b.Cells == nil {
+		return 0
+	}
+	return vt.CountErrorLines(b.Cells)
+}
+
 type Store struct {
 	blocks []*Block
 	limit  int
