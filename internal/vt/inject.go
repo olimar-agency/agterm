@@ -76,20 +76,24 @@ const (
 
 // errorRGBRedMin defines the truecolor "error" rule: the red channel must be
 // at least errorRGBRedMin, AND both green and blue must be at most half of
-// red (see isErrorColor).
+// red (see isErrorColor). Intent (ratified in agterm#16): dominant
+// saturated red, excluding orange/brown/other warm non-reds. Four canonical
+// cases anchor that intent — don't change this rule without re-checking all
+// four (each has a regression test in inject_test.go):
 //
-// agterm#16's contract specified a fixed additive margin instead (R >
-// G+40 && R > B+40), justified as excluding orange/brown — but that formula
-// doesn't actually deliver on it: classic orange #FFA500 (255,165,0) still
-// satisfies R>G+40 (255>205) and R>B+40 (255>40), so it would be
-// misclassified as "error". Caught by TestAnnotate_OrangeIsNotError before
-// this shipped. A fixed additive margin doesn't scale with R's magnitude —
-// at high brightness it leaves too much room for G. The proportional form
-// used here (G,B capped at R/2) preserves every example the contract cited
-// (#D70000, #FF5555 both still classify as error — see
-// TestAnnotate_TruecolorRedAtThresholdGetsMarker) while actually excluding
-// orange. Flagged for Architect review; not reopening the rest of the
-// contract, only this one formula.
+//	#D70000 (215,0,0)   → error     (saturated red)
+//	#FF5555 (255,85,85) → error     (light/bright red)
+//	#FFA500 (255,165,0) → not error (orange)
+//	#8B4513 (139,69,19) → not error (brown, R < errorRGBRedMin)
+//
+// agterm#16's contract originally specified a fixed additive margin instead
+// (R > G+40 && R > B+40) — but that formula doesn't actually deliver on the
+// same intent: orange still satisfies R>G+40 (255>205) and R>B+40 (255>40),
+// so it would misclassify as "error". Caught by TestAnnotate_OrangeIsNotError
+// before this shipped; a fixed additive margin doesn't scale with R's
+// magnitude, leaving too much room for G at high brightness. This
+// proportional form (G,B capped at R/2) was verified against the table
+// above and ratified as the contract's official rule.
 const errorRGBRedMin = 160
 
 // isErrorCell reports whether c is classified as semantic "error" per the
