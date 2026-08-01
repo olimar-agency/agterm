@@ -367,6 +367,25 @@ func TestUpdate_PtyMsg_BelowThresholdStyledErrorsDoNotAutoOpenPanel(t *testing.T
 	}
 }
 
+func TestUpdate_PtyMsg_NoCellsFallbackDoesNotAutoOpenOnExitZero(t *testing.T) {
+	sh := &fakeShell{}
+	ch := make(chan ai.StreamResult, 1)
+	m := newTestModel(sh, &fakeProvider{name: "fake", ch: ch}, &fakeRecorder{})
+	m.running = true
+	m.parser.StartBlock("noop", "/tmp")
+
+	// No SegOutput at all before SegCommandEnd — the block closes with
+	// Cells == nil (zero value, never touched by feedVT). ErrorLineCount()
+	// must fall back to 0, not panic on a nil grid.
+	segs := []pty.Segment{{Kind: pty.SegCommandEnd, ExitCode: 0}}
+	tm, _ := m.Update(ptyMsg{segs: segs})
+	m = mustModel(t, tm)
+
+	if m.aiOpen {
+		t.Fatalf("expected AI panel to stay closed for a Cells==nil block at exit 0")
+	}
+}
+
 // ── aiChunkMsg: streaming state transitions ──────────────────────────────────
 
 func TestUpdate_AiChunkMsg_AccumulatesTextWhileStreaming(t *testing.T) {

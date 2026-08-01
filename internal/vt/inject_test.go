@@ -80,6 +80,45 @@ func TestAnnotate_TruecolorJustBelowThresholdGetsNoMarker(t *testing.T) {
 	}
 }
 
+func TestAnnotate_RGBBoundaryExactlyAtThresholdClassifiesAsError(t *testing.T) {
+	// R=160 (== errorRGBRedMin), G=B=80 (== R/2, the boundary is inclusive
+	// per isErrorColor's <=).
+	row := []Cell{cell('x', ColorRGB{R: 160, G: 80, B: 80})}
+	got := Annotate([][]Cell{row})
+	want := ErrorMarkerOpen + "x" + ErrorMarkerClose
+	if got != want {
+		t.Fatalf("Annotate() = %q, want %q (boundary values are inclusive)", got, want)
+	}
+}
+
+func TestAnnotate_RGBOneChannelJustOverHalfIsNotError(t *testing.T) {
+	// R=160, G=81 (one over R/2=80) — a single channel crossing the
+	// boundary is enough to disqualify the whole color.
+	row := []Cell{cell('x', ColorRGB{R: 160, G: 81, B: 0})}
+	got := Annotate([][]Cell{row})
+	if got != "x" {
+		t.Fatalf("Annotate() = %q, want unmarked %q (G just over R/2)", got, "x")
+	}
+}
+
+func TestAnnotate_PureRedRGBClassifiesAsError(t *testing.T) {
+	row := []Cell{cell('x', ColorRGB{R: 255, G: 0, B: 0})}
+	got := Annotate([][]Cell{row})
+	want := ErrorMarkerOpen + "x" + ErrorMarkerClose
+	if got != want {
+		t.Fatalf("Annotate() = %q, want %q", got, want)
+	}
+}
+
+func TestAnnotate_EmptyRowsReturnsEmptyString(t *testing.T) {
+	if got := Annotate([][]Cell{}); got != "" {
+		t.Fatalf("Annotate([][]Cell{}) = %q, want empty string", got)
+	}
+	if got := Annotate(nil); got != "" {
+		t.Fatalf("Annotate(nil) = %q, want empty string", got)
+	}
+}
+
 func TestAnnotate_OrangeIsNotError(t *testing.T) {
 	// Classic orange: high red, but green isn't suppressed enough to read
 	// as "red-dominant" — must not be classified as error.
