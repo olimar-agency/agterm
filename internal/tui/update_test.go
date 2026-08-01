@@ -319,6 +319,54 @@ func TestUpdate_PtyMsg_NonZeroExitDoesNotReopenAlreadyOpenPanel(t *testing.T) {
 	}
 }
 
+// ── ptyMsg: styled-error auto-trigger (agterm#16) ────────────────────────────
+
+func TestUpdate_PtyMsg_StyledErrorsAutoOpenPanelEvenOnExitZero(t *testing.T) {
+	sh := &fakeShell{}
+	ch := make(chan ai.StreamResult, 1)
+	m := newTestModel(sh, &fakeProvider{name: "fake", ch: ch}, &fakeRecorder{})
+	m.running = true
+	m.parser.StartBlock("lint", "/tmp")
+
+	// 3 lines of red text meets autoTriggerErrorLineThreshold, exit code 0
+	// (a linter that reports failures without a non-zero exit).
+	red := "\x1b[31merror one\x1b[0m\n\x1b[31merror two\x1b[0m\n\x1b[31merror three\x1b[0m\n"
+	segs := []pty.Segment{
+		{Kind: pty.SegOutput, Data: []byte(red)},
+		{Kind: pty.SegCommandEnd, ExitCode: 0},
+	}
+	tm, _ := m.Update(ptyMsg{segs: segs})
+	m = mustModel(t, tm)
+
+	if !m.aiOpen {
+		t.Fatalf("expected AI panel to auto-open on styled errors despite exit 0")
+	}
+	if !strings.Contains(m.aiInput.Value(), "lint") || !strings.Contains(m.aiInput.Value(), "3") {
+		t.Fatalf("expected AI input to mention the command and the styled-error line count, got %q", m.aiInput.Value())
+	}
+}
+
+func TestUpdate_PtyMsg_BelowThresholdStyledErrorsDoNotAutoOpenPanel(t *testing.T) {
+	sh := &fakeShell{}
+	ch := make(chan ai.StreamResult, 1)
+	m := newTestModel(sh, &fakeProvider{name: "fake", ch: ch}, &fakeRecorder{})
+	m.running = true
+	m.parser.StartBlock("ls", "/tmp")
+
+	// Only 2 red lines — below autoTriggerErrorLineThreshold(3), exit 0.
+	red := "\x1b[31mone\x1b[0m\n\x1b[31mtwo\x1b[0m\nplain line\n"
+	segs := []pty.Segment{
+		{Kind: pty.SegOutput, Data: []byte(red)},
+		{Kind: pty.SegCommandEnd, ExitCode: 0},
+	}
+	tm, _ := m.Update(ptyMsg{segs: segs})
+	m = mustModel(t, tm)
+
+	if m.aiOpen {
+		t.Fatalf("expected AI panel to stay closed below the styled-error threshold")
+	}
+}
+
 // ── aiChunkMsg: streaming state transitions ──────────────────────────────────
 
 func TestUpdate_AiChunkMsg_AccumulatesTextWhileStreaming(t *testing.T) {

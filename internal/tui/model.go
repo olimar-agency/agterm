@@ -85,6 +85,14 @@ type Model struct {
 
 const aiPanelHeight = 12 // lines reserved for AI panel when open
 
+// autoTriggerErrorLineThreshold is the minimum number of semantic-"error"
+// lines (agterm#16, Block.ErrorLineCount) a completed block must contain to
+// auto-open the AI panel on its own, independent of exit code — catches
+// tools (linters, some test runners) that print errors in red but still
+// exit 0. 3 filters a single stray red character (progress bars, prompts)
+// without requiring a real failure to also set a non-zero exit code.
+const autoTriggerErrorLineThreshold = 3
+
 // New constructs the Model, loading config and wiring the AI provider.
 func New() (Model, error) {
 	sh, err := ptyPkg.New("")
@@ -281,12 +289,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.recorder != nil {
 					m.recorder.Append(last) //nolint:errcheck
 				}
-				// auto-trigger AI on non-zero exit
-				if last.ExitCode != 0 && m.provider != nil && !m.aiOpen {
+				// auto-trigger AI on non-zero exit, or on enough styled
+				// "error" output even when the process itself exited 0
+				// (agterm#16 — e.g. a linter that reports failures but
+				// doesn't propagate them to its exit code).
+				styledErrorCount := last.ErrorLineCount()
+				if (last.ExitCode != 0 || styledErrorCount >= autoTriggerErrorLineThreshold) && m.provider != nil && !m.aiOpen {
 					m.aiOpen = true
 					m.input.Blur()
 					m.aiInput.Focus()
-					m.aiInput.SetValue(fmt.Sprintf("'%s' failed (exit %d) — what went wrong?", last.Command, last.ExitCode))
+					if last.ExitCode != 0 {
+						m.aiInput.SetValue(fmt.Sprintf("'%s' failed (exit %d) — what went wrong?", last.Command, last.ExitCode))
+					} else {
+						m.aiInput.SetValue(fmt.Sprintf("'%s' printed %d line(s) that look like errors — what went wrong?", last.Command, styledErrorCount))
+					}
 				}
 			}
 		}
