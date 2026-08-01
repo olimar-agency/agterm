@@ -77,9 +77,10 @@ type Model struct {
 	autoRunReadonly bool
 
 	// layout
-	width  int
-	height int
-	err    error
+	width    int
+	height   int
+	viewport Viewport
+	err      error
 }
 
 const aiPanelHeight = 12 // lines reserved for AI panel when open
@@ -267,6 +268,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ptyMsg:
 		m.parser.Feed(msg.segs)
+		m.syncViewport()
 		if m.running && m.parser.Active() == nil {
 			m.running = false
 			if !m.aiOpen {
@@ -414,9 +416,75 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.Blur()
 			m.aiInput.Focus()
 
-		case tea.KeyCtrlC, tea.KeyCtrlD:
+		case tea.KeyCtrlC:
 			m.shutdown()
 			return m, tea.Quit
+
+		case tea.KeyCtrlD:
+			// Ctrl+D conventionally quits on an idle prompt (EOF), but once
+			// the user has scrolled up it reads more naturally as "scroll
+			// down" — same convention adopted for Ctrl+U below. Ctrl+C
+			// remains an unconditional quit regardless of scroll state.
+			if !m.viewport.AtBottom() {
+				m.viewport.HalfDown(m.blockHeight())
+			} else {
+				m.shutdown()
+				return m, tea.Quit
+			}
+
+		case tea.KeyCtrlU:
+			// Bubbles' textinput binds ctrl+u to "delete before cursor"
+			// (real shell muscle memory), so only steal it for scrolling
+			// once already scrolled up — otherwise let it edit the command.
+			if !m.viewport.AtBottom() {
+				total := m.syncViewport()
+				m.viewport.HalfUp(total, m.blockHeight())
+			} else {
+				var tiCmd tea.Cmd
+				m.input, tiCmd = m.input.Update(msg)
+				cmds = append(cmds, tiCmd)
+			}
+
+		case tea.KeyHome:
+			// Bubbles' textinput binds home to "cursor to line start", so
+			// same rule as ctrl+u: only repurpose once already scrolled.
+			if !m.viewport.AtBottom() {
+				total := m.syncViewport()
+				m.viewport.JumpTop(total, m.blockHeight())
+			} else {
+				var tiCmd tea.Cmd
+				m.input, tiCmd = m.input.Update(msg)
+				cmds = append(cmds, tiCmd)
+			}
+
+		case tea.KeyEnd:
+			if !m.viewport.AtBottom() {
+				m.viewport.JumpBottom()
+			} else {
+				var tiCmd tea.Cmd
+				m.input, tiCmd = m.input.Update(msg)
+				cmds = append(cmds, tiCmd)
+			}
+
+		case tea.KeyEsc:
+			// Esc-to-bottom is the contract's documented escape hatch. It
+			// doesn't collide with any existing binding here: Bubbles'
+			// textinput.DefaultKeyMap has no Esc entry, so at-bottom this
+			// falls through to input.Update as a no-op, same as today.
+			if !m.viewport.AtBottom() {
+				m.viewport.JumpBottom()
+			} else {
+				var tiCmd tea.Cmd
+				m.input, tiCmd = m.input.Update(msg)
+				cmds = append(cmds, tiCmd)
+			}
+
+		case tea.KeyPgUp:
+			total := m.syncViewport()
+			m.viewport.PageUp(total, m.blockHeight())
+
+		case tea.KeyPgDown:
+			m.viewport.PageDown(m.blockHeight())
 
 		case tea.KeyEnter:
 			cmd := strings.TrimSpace(m.input.Value())
@@ -464,6 +532,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // ── View ──────────────────────────────────────────────────────────────────────
 
+// flattenLines renders every block plus any in-progress active block into
+// the same flat line sequence View() displays a window of. Shared so the
+// growth-tracking in the ptyMsg handler (see Viewport.Note) sees exactly
+// the line count View() will render, without duplicating the logic.
+func (m Model) flattenLines() []string {
+	var lines []string
+	for _, b := range m.store.All() {
+		lines = append(lines, blockLines(b, m.width)...)
+	}
+	if active := m.parser.Active(); active != nil {
+		lines = append(lines, activeLines(active, m.width)...)
+	}
+	return lines
+}
+
+// syncViewport resyncs the scroll growth baseline (see Viewport.Note) from
+// the current history and returns the total line count, so callers can
+// feed the same value straight into PageUp/HalfUp/JumpTop's clamp without
+// re-flattening. Call it before any Update() action that mutates the
+// offset — the ptyMsg handler (the only event that appends to history) and
+// every scroll-away-from-bottom key — so the next growth check never sees
+// a stale lastTotal. Centralized here as the single call site: OCR flagged
+// the same len(m.flattenLines()) + Note() pair repeated across five
+// branches as an easy-to-forget invariant for future scroll keys to miss.
+func (m *Model) syncViewport() int {
+	total := len(m.flattenLines())
+	m.viewport.Note(total)
+	return total
+}
+
+// blockHeight computes how many lines are available for the block-list
+// panel, after reserving space for the bottom bar, the AI panel (when
+// open), and the scroll indicator (when scrolled). Shared between View()
+// and the Update() scroll handlers so paging math matches what's rendered.
+func (m Model) blockHeight() int {
+	bottomBarH := 1
+	panelH := 0
+	if m.aiOpen {
+		panelH = aiPanelHeight
+	}
+	indicatorH := 0
+	if !m.viewport.AtBottom() {
+		indicatorH = 1
+	}
+	h := m.height - bottomBarH - panelH - indicatorH
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
 func (m Model) View() string {
 	if m.err != nil {
 		return errorStyle.Render("agterm: "+m.err.Error()) + "\n"
@@ -472,32 +591,22 @@ func (m Model) View() string {
 		return ""
 	}
 
-	// allocate vertical space
-	bottomBarH := 1
-	panelH := 0
-	if m.aiOpen {
-		panelH = aiPanelHeight
-	}
-	blockH := m.height - bottomBarH - panelH
-	if blockH < 1 {
-		blockH = 1
-	}
+	blockH := m.blockHeight()
 
 	// ── block list ────────────────────────────────────────────────────────────
-	var lines []string
-	for _, b := range m.store.All() {
-		lines = append(lines, blockLines(b, m.width)...)
+	lines := m.flattenLines()
+	content := strings.Join(m.viewport.Slice(lines, blockH), "\n")
+
+	// ── scroll indicator ─────────────────────────────────────────────────────
+	var indicator string
+	if !m.viewport.AtBottom() {
+		above := m.viewport.AboveBottom(len(lines), blockH)
+		text := fmt.Sprintf("── scrolled ↑ %d lines · End/Esc to jump to bottom ──", above)
+		// blockHeight() reserves exactly 1 line for this; MaxWidth keeps a
+		// long message from wrapping to a second line and pushing the rest
+		// of the layout down by one row on narrow terminals.
+		indicator = dimStyle.MaxWidth(m.width).Render(text)
 	}
-	if active := m.parser.Active(); active != nil {
-		lines = append(lines, activeLines(active, m.width)...)
-	}
-	if len(lines) > blockH {
-		lines = lines[len(lines)-blockH:]
-	}
-	for len(lines) < blockH {
-		lines = append([]string{""}, lines...)
-	}
-	content := strings.Join(lines, "\n")
 
 	// ── AI panel ──────────────────────────────────────────────────────────────
 	var panel string
@@ -516,6 +625,9 @@ func (m Model) View() string {
 	}
 
 	parts := []string{content}
+	if indicator != "" {
+		parts = append(parts, indicator)
+	}
 	if panel != "" {
 		parts = append(parts, panel)
 	}
