@@ -46,6 +46,7 @@ func TestParser_OutputBeforeEndCaptured(t *testing.T) {
 
 	p.StartBlock("echo hi", "/")
 	feed(p,
+		pty.Segment{Kind: pty.SegCommandStart},
 		pty.Segment{Kind: pty.SegOutput, Data: []byte("hi\n")},
 		pty.Segment{Kind: pty.SegCommandEnd, ExitCode: 0},
 		pty.Segment{Kind: pty.SegOutput, Data: []byte("prompt$ ")}, // should be discarded
@@ -57,6 +58,35 @@ func TestParser_OutputBeforeEndCaptured(t *testing.T) {
 	}
 	if blocks[0].Output != "hi\n" {
 		t.Errorf("output: got %q want %q", blocks[0].Output, "hi\n")
+	}
+}
+
+// TestParser_OutputBeforeCommandStartDiscarded is a regression test for
+// agterm#18: output arriving between StartBlock (called right before
+// agterm writes the command to the pty) and the OSC 133;C confirmation is
+// whatever the shell's own line editor does with that write — its echo or
+// redraw of the command line, not the command's real output — and must
+// never reach Block.Output/Cells. This is what actually fixes the
+// duplication for shells with their own line editor (zsh's ZLE, readline),
+// which redraw independently of the pty's ECHO termios flag.
+func TestParser_OutputBeforeCommandStartDiscarded(t *testing.T) {
+	store := NewStore(10)
+	p := NewParser(store)
+
+	p.StartBlock("echo ok", "/")
+	feed(p,
+		pty.Segment{Kind: pty.SegOutput, Data: []byte("eecho ok\n")}, // shell's own echo/redraw noise
+		pty.Segment{Kind: pty.SegCommandStart},
+		pty.Segment{Kind: pty.SegOutput, Data: []byte("ok\n")}, // the command's real output
+		pty.Segment{Kind: pty.SegCommandEnd, ExitCode: 0},
+	)
+
+	blocks := store.All()
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 block, got %d", len(blocks))
+	}
+	if got := blocks[0].Output; got != "ok\n" {
+		t.Errorf("Output = %q, want %q (pre-SegCommandStart noise must be discarded)", got, "ok\n")
 	}
 }
 
@@ -110,6 +140,7 @@ func TestParser_CRLFNormalised(t *testing.T) {
 
 	p.StartBlock("cmd", "/")
 	feed(p,
+		pty.Segment{Kind: pty.SegCommandStart},
 		pty.Segment{Kind: pty.SegOutput, Data: []byte("line1\r\nline2\r\n")},
 		pty.Segment{Kind: pty.SegCommandEnd, ExitCode: 0},
 	)
@@ -139,6 +170,7 @@ func TestParser_PlainTextParityWithLegacyStripping(t *testing.T) {
 		p := NewParser(store)
 		p.StartBlock("cmd", "/")
 		feed(p,
+			pty.Segment{Kind: pty.SegCommandStart},
 			pty.Segment{Kind: pty.SegOutput, Data: []byte(fixture)},
 			pty.Segment{Kind: pty.SegCommandEnd, ExitCode: 0},
 		)
@@ -162,6 +194,7 @@ func TestParser_PlainTextStripsBareControlCharsFromCells(t *testing.T) {
 	p := NewParser(store)
 	p.StartBlock("cmd", "/")
 	feed(p,
+		pty.Segment{Kind: pty.SegCommandStart},
 		pty.Segment{Kind: pty.SegOutput, Data: []byte("AB\x07\x08CD\nEF\n")},
 		pty.Segment{Kind: pty.SegCommandEnd, ExitCode: 0},
 	)

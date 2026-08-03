@@ -332,6 +332,7 @@ func TestUpdate_PtyMsg_StyledErrorsAutoOpenPanelEvenOnExitZero(t *testing.T) {
 	// (a linter that reports failures without a non-zero exit).
 	red := "\x1b[31merror one\x1b[0m\n\x1b[31merror two\x1b[0m\n\x1b[31merror three\x1b[0m\n"
 	segs := []pty.Segment{
+		{Kind: pty.SegCommandStart},
 		{Kind: pty.SegOutput, Data: []byte(red)},
 		{Kind: pty.SegCommandEnd, ExitCode: 0},
 	}
@@ -356,6 +357,7 @@ func TestUpdate_PtyMsg_BelowThresholdStyledErrorsDoNotAutoOpenPanel(t *testing.T
 	// Only 2 red lines — below autoTriggerErrorLineThreshold(3), exit 0.
 	red := "\x1b[31mone\x1b[0m\n\x1b[31mtwo\x1b[0m\nplain line\n"
 	segs := []pty.Segment{
+		{Kind: pty.SegCommandStart},
 		{Kind: pty.SegOutput, Data: []byte(red)},
 		{Kind: pty.SegCommandEnd, ExitCode: 0},
 	}
