@@ -17,6 +17,18 @@ type Parser struct {
 	active  *Block
 	counter int
 
+	// started becomes true once SegCommandStart (OSC 133;C) has been
+	// observed for the active block. Output arriving before that point is
+	// whatever the shell does with the command line agterm just wrote —
+	// its own line editor's echo/redraw, not the command's real output —
+	// and is discarded rather than attributed to the block (agterm#18).
+	// disableEcho (internal/pty/shell.go) already removes the kernel's own
+	// echo, but an interactive shell's line editor (zsh's ZLE, readline)
+	// does its own redraw independent of that termios flag; this is the
+	// terminal-agnostic fix that holds regardless of which shell or line
+	// editor produced the noise.
+	started bool
+
 	// vtParser and rowBuf accumulate the active block's Cells. One vt.Parser
 	// per block, so SGR state never leaks across commands (agterm#6).
 	vtParser *vt.Parser
@@ -45,6 +57,7 @@ func (p *Parser) StartBlock(cmd, workDir string) {
 	}
 	p.vtParser = vt.NewParser()
 	p.rowBuf = nil
+	p.started = false
 }
 
 // Feed processes an ordered slice of segments from the Detector.
@@ -53,7 +66,7 @@ func (p *Parser) Feed(segs []pty.Segment) {
 	for _, seg := range segs {
 		switch seg.Kind {
 		case pty.SegOutput:
-			if p.active != nil {
+			if p.active != nil && p.started {
 				// normalise CR LF → LF and strip bare CR to avoid display artifacts
 				out := strings.ReplaceAll(string(seg.Data), "\r\n", "\n")
 				out = strings.ReplaceAll(out, "\r", "")
@@ -67,6 +80,7 @@ func (p *Parser) Feed(segs []pty.Segment) {
 			if p.active == nil {
 				p.StartBlock("", "")
 			}
+			p.started = true
 
 		case pty.SegCommandEnd:
 			if p.active != nil {
