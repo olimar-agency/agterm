@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"syscall"
 
 	creackpty "github.com/creack/pty"
 )
@@ -24,8 +25,30 @@ func New(shellPath string) (*Shell, error) {
 	cmd := exec.Command(shellPath)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
-	ptm, err := creackpty.Start(cmd)
+	// Open (rather than creackpty.Start, which would leave the slave's
+	// termios at its default) so disableEcho can run before the shell
+	// starts reading from it — see termios.go and agterm#18.
+	ptm, tty, err := creackpty.Open()
 	if err != nil {
+		return nil, err
+	}
+	defer tty.Close() //nolint:errcheck // best-effort; the parent's copy of the fd is no longer needed once cmd.Start() has dup'd it into the child
+
+	if err := disableEcho(tty); err != nil {
+		ptm.Close() //nolint:errcheck
+		return nil, err
+	}
+
+	cmd.Stdin = tty
+	cmd.Stdout = tty
+	cmd.Stderr = tty
+	// Setsid + Setctty: replicates what creackpty.Start does internally
+	// (via StartWithSize), starting the shell in a new session with tty as
+	// its controlling terminal.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+
+	if err := cmd.Start(); err != nil {
+		ptm.Close() //nolint:errcheck
 		return nil, err
 	}
 

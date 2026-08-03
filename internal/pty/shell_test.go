@@ -111,6 +111,51 @@ func TestShell_WriteAndRead(t *testing.T) {
 	t.Fatalf("expected output to contain %q, got %q", marker, seen.String())
 }
 
+// TestShell_WriteDoesNotEchoBackTheCommand is a regression test for
+// agterm#18: New() disables the pty's ECHO so the exact bytes Write sends
+// (a full command line composed by agterm's own input widget, submitted
+// atomically) aren't read back a second time by Read, layered underneath
+// the real command output. /bin/sh has no line editor of its own — unlike
+// an interactive zsh/bash, whatever echo it would show is purely the
+// kernel line discipline's, making this a clean, deterministic check.
+func TestShell_WriteDoesNotEchoBackTheCommand(t *testing.T) {
+	requireBinary(t, "/bin/sh")
+	s, err := New("/bin/sh")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	marker := "AGTERM_NO_ECHO_TEST_MARKER"
+	cmd := "echo " + marker
+	if _, err := s.Write([]byte(cmd + "\r")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	var seen strings.Builder
+	for time.Now().Before(deadline) {
+		seen.WriteString(readWithTimeout(t, s, 5*time.Second))
+		if strings.Contains(seen.String(), marker) {
+			break
+		}
+	}
+
+	got := seen.String()
+	if !strings.Contains(got, marker) {
+		t.Fatalf("expected output to eventually contain %q, got %q", marker, got)
+	}
+	// The real `echo` output contributes exactly one occurrence of marker.
+	// A second occurrence would mean the written command line (which also
+	// contains marker, as part of "echo "+marker) got echoed back raw.
+	if n := strings.Count(got, marker); n != 1 {
+		t.Fatalf("expected marker to appear exactly once (only from echo's real output), appeared %d times in %q", n, got)
+	}
+	if strings.Contains(got, cmd) {
+		t.Fatalf("expected the written command line not to be echoed back verbatim, got %q", got)
+	}
+}
+
 func TestShell_Resize(t *testing.T) {
 	requireBinary(t, "/bin/sh")
 	s, err := New("/bin/sh")
