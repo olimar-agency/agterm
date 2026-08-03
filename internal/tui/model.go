@@ -246,6 +246,10 @@ func (m Model) viewStartupChoice() string {
 	if n > 0 {
 		lastAgo = humanizeSince(time.Since(m.historyBlocks[n-1].StartedAt))
 	}
+	commandWord := "comandos"
+	if n == 1 {
+		commandWord = "comando"
+	}
 
 	option := func(i int, label string) string {
 		if m.startupChoice == i {
@@ -258,7 +262,7 @@ func (m Model) viewStartupChoice() string {
 		"",
 		"  agterm encontró historial de una sesión anterior.",
 		"",
-		option(0, fmt.Sprintf("Continuar sesión anterior (%d comandos, el último %s)", n, lastAgo)),
+		option(0, fmt.Sprintf("Continuar sesión anterior (%d %s, el último %s)", n, commandWord, lastAgo)),
 		option(1, "Empezar sesión nueva y limpia"),
 		"",
 		dimStyle.Render("  ↑/↓ elegir · Enter confirmar · C/N acceso directo · Ctrl+C salir"),

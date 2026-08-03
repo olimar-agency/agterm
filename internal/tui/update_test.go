@@ -1180,6 +1180,27 @@ func TestView_StartupChoice_RendersInsteadOfTheNormalUI(t *testing.T) {
 	}
 }
 
+func TestView_StartupChoice_PluralizesCommandCount(t *testing.T) {
+	m := modelAwaitingStartupChoice(&block.Block{Command: "old command"})
+	m.width, m.height = 80, 24
+
+	view := m.View()
+	if !strings.Contains(view, "1 comando,") {
+		t.Fatalf("expected singular %q for a single history block, got:\n%s", "1 comando,", view)
+	}
+	if strings.Contains(view, "1 comandos") {
+		t.Fatalf("expected no incorrect plural for a single history block, got:\n%s", view)
+	}
+
+	m = modelAwaitingStartupChoice(&block.Block{Command: "old 1"}, &block.Block{Command: "old 2"})
+	m.width, m.height = 80, 24
+
+	view = m.View()
+	if !strings.Contains(view, "2 comandos,") {
+		t.Fatalf("expected plural %q for two history blocks, got:\n%s", "2 comandos,", view)
+	}
+}
+
 func TestView_StartupChoice_CapsLineWidthOnNarrowTerminal(t *testing.T) {
 	old := &block.Block{Command: "old command"}
 	m := modelAwaitingStartupChoice(old)
