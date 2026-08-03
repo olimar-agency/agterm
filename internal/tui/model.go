@@ -74,6 +74,14 @@ type Model struct {
 	// history
 	recorder recorderIO
 
+	// startup choice — only relevant while awaitingStartupChoice is true.
+	// New() loads persisted history eagerly but withholds it from store
+	// until the user picks "continue" here, so a fresh session doesn't
+	// have to re-read the history file on that path (agterm#21).
+	awaitingStartupChoice bool
+	historyBlocks         []*block.Block
+	startupChoice         int // 0 = continue previous session, 1 = start fresh
+
 	autoRunReadonly bool
 
 	// layout
@@ -133,12 +141,13 @@ func New() (Model, error) {
 		m.autoRunReadonly = cfg.AutoRunReadonly
 	}
 
-	// load persistent history into the in-memory store (non-fatal)
+	// Load persistent history eagerly, but don't apply it to the store yet
+	// — offer the user a choice between continuing the previous session
+	// and starting fresh (agterm#21). Applied in resolveStartupChoice.
 	if historyPath, err := history.DefaultPath(); err == nil {
 		if blocks, err := history.Load(historyPath); err == nil {
-			for _, b := range blocks {
-				store.Add(b)
-			}
+			m.historyBlocks = blocks
+			m.awaitingStartupChoice = len(blocks) > 0
 		}
 
 		// open history recorder for append (non-fatal)
@@ -182,6 +191,111 @@ func (m *Model) switchProvider(name string) string {
 	m.provider = p
 	m.sendContext = pcfg.SendContext
 	return ""
+}
+
+// ── Startup choice (agterm#21) ───────────────────────────────────────────────
+
+// updateStartupChoice handles key input while awaitingStartupChoice is
+// true, gating every other key handler in Update() — the user must resolve
+// this choice before doing anything else.
+func (m Model) updateStartupChoice(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC, tea.KeyCtrlD:
+		m.shutdown()
+		return m, tea.Quit
+	case tea.KeyUp, tea.KeyDown:
+		m.startupChoice = 1 - m.startupChoice // only two options, toggle
+	case tea.KeyEnter:
+		m = m.resolveStartupChoice(m.startupChoice == 0)
+	case tea.KeyRunes:
+		switch string(msg.Runes) {
+		case "c", "C":
+			m = m.resolveStartupChoice(true)
+		case "n", "N":
+			m = m.resolveStartupChoice(false)
+		}
+	}
+	return m, nil
+}
+
+// resolveStartupChoice applies (or discards) the eagerly-loaded history
+// blocks and closes the choice screen. Discarding here only affects this
+// session's in-memory store — the history file itself is untouched, and
+// the recorder keeps appending to it either way.
+func (m Model) resolveStartupChoice(keepHistory bool) Model {
+	if keepHistory {
+		for _, b := range m.historyBlocks {
+			m.store.Add(b)
+		}
+	}
+	// Drop our reference in both branches: on "continue" the store now
+	// owns the blocks; on "fresh" only the recorder and the on-disk file
+	// do. historyBlocks is meaningless past this point — any future read
+	// of it must be guarded by awaitingStartupChoice, not assume nil means
+	// "no history existed".
+	m.historyBlocks = nil
+	m.awaitingStartupChoice = false
+	return m
+}
+
+// viewStartupChoice renders the choice screen in place of the normal
+// terminal UI.
+func (m Model) viewStartupChoice() string {
+	n := len(m.historyBlocks)
+	lastAgo := "hace un momento"
+	if n > 0 {
+		lastAgo = humanizeSince(time.Since(m.historyBlocks[n-1].StartedAt))
+	}
+
+	option := func(i int, label string) string {
+		if m.startupChoice == i {
+			return promptStyle.Render("❯ ") + cmdStyle.Render(label)
+		}
+		return "  " + label
+	}
+
+	lines := []string{
+		"",
+		"  agterm encontró historial de una sesión anterior.",
+		"",
+		option(0, fmt.Sprintf("Continuar sesión anterior (%d comandos, el último %s)", n, lastAgo)),
+		option(1, "Empezar sesión nueva y limpia"),
+		"",
+		dimStyle.Render("  ↑/↓ elegir · Enter confirmar · C/N acceso directo · Ctrl+C salir"),
+	}
+	// Every other screen in this file is width-aware (e.g. the scroll
+	// indicator's dimStyle.MaxWidth(m.width)) — match that here so a
+	// narrow terminal doesn't wrap/clip this screen unpredictably.
+	capped := make([]string, len(lines))
+	for i, l := range lines {
+		capped[i] = lipgloss.NewStyle().MaxWidth(m.width).Render(l)
+	}
+	return strings.Join(capped, "\n")
+}
+
+// humanizeSince renders d as a short, coarse "how long ago" string. d can
+// be zero, negative, or absurdly large — StartedAt comes from a JSONL
+// history file with no validation on write, so a manually edited entry, a
+// clock change, or a future timestamp must degrade gracefully rather than
+// print something like "hace -3d" or an unbounded day count.
+func humanizeSince(d time.Duration) string {
+	if d <= 0 {
+		return "hace un momento"
+	}
+	switch {
+	case d < time.Minute:
+		return "hace un momento"
+	case d < time.Hour:
+		return fmt.Sprintf("hace %dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("hace %dh", int(d.Hours()))
+	default:
+		days := int(d.Hours() / 24)
+		if days > 999 {
+			days = 999
+		}
+		return fmt.Sprintf("hace %dd", days)
+	}
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -337,6 +451,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case tea.KeyMsg:
+		if m.awaitingStartupChoice {
+			return m.updateStartupChoice(msg)
+		}
+
 		if m.running {
 			if b := keyBytes(msg); b != nil {
 				if _, err := m.shell.Write(b); err != nil {
@@ -605,6 +723,9 @@ func (m Model) View() string {
 	}
 	if m.width == 0 || m.height == 0 {
 		return ""
+	}
+	if m.awaitingStartupChoice {
+		return m.viewStartupChoice()
 	}
 
 	blockH := m.blockHeight()
