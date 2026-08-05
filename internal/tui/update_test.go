@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -332,6 +333,7 @@ func TestUpdate_PtyMsg_StyledErrorsAutoOpenPanelEvenOnExitZero(t *testing.T) {
 	// (a linter that reports failures without a non-zero exit).
 	red := "\x1b[31merror one\x1b[0m\n\x1b[31merror two\x1b[0m\n\x1b[31merror three\x1b[0m\n"
 	segs := []pty.Segment{
+		{Kind: pty.SegCommandStart},
 		{Kind: pty.SegOutput, Data: []byte(red)},
 		{Kind: pty.SegCommandEnd, ExitCode: 0},
 	}
@@ -356,6 +358,7 @@ func TestUpdate_PtyMsg_BelowThresholdStyledErrorsDoNotAutoOpenPanel(t *testing.T
 	// Only 2 red lines — below autoTriggerErrorLineThreshold(3), exit 0.
 	red := "\x1b[31mone\x1b[0m\n\x1b[31mtwo\x1b[0m\nplain line\n"
 	segs := []pty.Segment{
+		{Kind: pty.SegCommandStart},
 		{Kind: pty.SegOutput, Data: []byte(red)},
 		{Kind: pty.SegCommandEnd, ExitCode: 0},
 	}
@@ -1047,6 +1050,189 @@ func TestTextinputKeymapAssumptions(t *testing.T) {
 	if after.Value() != before.Value() || after.Position() != before.Position() {
 		t.Fatalf("assumption broken: esc now mutates textinput (value=%q pos=%d, want value=%q pos=%d) — the Esc-jumps-to-bottom gating in Update() needs revisiting",
 			after.Value(), after.Position(), before.Value(), before.Position())
+	}
+}
+
+// ── startup choice (agterm#21) ────────────────────────────────────────────────
+
+func modelAwaitingStartupChoice(historyBlocks ...*block.Block) Model {
+	m := newTestModel(&fakeShell{}, nil, nil)
+	m.awaitingStartupChoice = true
+	m.historyBlocks = historyBlocks
+	return m
+}
+
+func TestUpdate_StartupChoice_GatesAllOtherKeyHandling(t *testing.T) {
+	m := modelAwaitingStartupChoice()
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	m = mustModel(t, tm)
+
+	if m.input.Value() != "" {
+		t.Fatalf("expected keys to be gated by the startup choice, got input %q", m.input.Value())
+	}
+	if !m.awaitingStartupChoice {
+		t.Fatalf("expected an unrelated key to leave the choice unresolved")
+	}
+}
+
+func TestUpdate_StartupChoice_UpDownTogglesBetweenTheTwoOptions(t *testing.T) {
+	m := modelAwaitingStartupChoice()
+	if m.startupChoice != 0 {
+		t.Fatalf("expected default startupChoice 0 (continue), got %d", m.startupChoice)
+	}
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = mustModel(t, tm)
+	if m.startupChoice != 1 {
+		t.Fatalf("expected startupChoice 1 after Down, got %d", m.startupChoice)
+	}
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = mustModel(t, tm)
+	if m.startupChoice != 0 {
+		t.Fatalf("expected startupChoice back to 0 after Up, got %d", m.startupChoice)
+	}
+}
+
+func TestUpdate_StartupChoice_CKeepsHistory(t *testing.T) {
+	old := &block.Block{Command: "old command"}
+	m := modelAwaitingStartupChoice(old)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	m = mustModel(t, tm)
+
+	if m.awaitingStartupChoice {
+		t.Fatalf("expected the choice to be resolved")
+	}
+	all := m.store.All()
+	if len(all) != 1 || all[0] != old {
+		t.Fatalf("expected history block applied to the store, got %v", all)
+	}
+	if m.historyBlocks != nil {
+		t.Fatalf("expected historyBlocks cleared after resolving, got %v", m.historyBlocks)
+	}
+}
+
+func TestUpdate_StartupChoice_NDiscardsHistory(t *testing.T) {
+	old := &block.Block{Command: "old command"}
+	m := modelAwaitingStartupChoice(old)
+
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m = mustModel(t, tm)
+
+	if m.awaitingStartupChoice {
+		t.Fatalf("expected the choice to be resolved")
+	}
+	if len(m.store.All()) != 0 {
+		t.Fatalf("expected a fresh session to leave the store empty, got %v", m.store.All())
+	}
+}
+
+func TestUpdate_StartupChoice_EnterAppliesTheHighlightedOption(t *testing.T) {
+	old := &block.Block{Command: "old command"}
+
+	// Default highlight (0) is "continue" — Enter applies history.
+	m := modelAwaitingStartupChoice(old)
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mustModel(t, tm)
+	if len(m.store.All()) != 1 {
+		t.Fatalf("expected Enter on the default highlight to keep history, got %v", m.store.All())
+	}
+
+	// After Down, highlight is "fresh" (1) — Enter discards history.
+	m = modelAwaitingStartupChoice(old)
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = mustModel(t, tm)
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mustModel(t, tm)
+	if len(m.store.All()) != 0 {
+		t.Fatalf("expected Enter on the fresh-session highlight to discard history, got %v", m.store.All())
+	}
+}
+
+func TestUpdate_StartupChoice_CtrlCQuits(t *testing.T) {
+	sh := &fakeShell{}
+	m := newTestModel(sh, nil, nil)
+	m.awaitingStartupChoice = true
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+
+	if !sh.closed {
+		t.Fatalf("expected ctrl+c to shut down even from the startup choice screen")
+	}
+	if _, ok := runCmd(cmd).(tea.QuitMsg); !ok {
+		t.Fatalf("expected returned cmd to resolve to tea.QuitMsg")
+	}
+}
+
+func TestView_StartupChoice_RendersInsteadOfTheNormalUI(t *testing.T) {
+	old := &block.Block{Command: "old command"}
+	m := modelAwaitingStartupChoice(old)
+	m.width, m.height = 80, 24
+
+	view := m.View()
+	if !strings.Contains(view, "Continuar sesión anterior") || !strings.Contains(view, "Empezar sesión nueva") {
+		t.Fatalf("expected the startup choice screen, got:\n%s", view)
+	}
+	if strings.Contains(view, "old command") {
+		t.Fatalf("expected history NOT to be visible in the block list before the choice is resolved, got:\n%s", view)
+	}
+}
+
+func TestView_StartupChoice_PluralizesCommandCount(t *testing.T) {
+	m := modelAwaitingStartupChoice(&block.Block{Command: "old command"})
+	m.width, m.height = 80, 24
+
+	view := m.View()
+	if !strings.Contains(view, "1 comando,") {
+		t.Fatalf("expected singular %q for a single history block, got:\n%s", "1 comando,", view)
+	}
+	if strings.Contains(view, "1 comandos") {
+		t.Fatalf("expected no incorrect plural for a single history block, got:\n%s", view)
+	}
+
+	m = modelAwaitingStartupChoice(&block.Block{Command: "old 1"}, &block.Block{Command: "old 2"})
+	m.width, m.height = 80, 24
+
+	view = m.View()
+	if !strings.Contains(view, "2 comandos,") {
+		t.Fatalf("expected plural %q for two history blocks, got:\n%s", "2 comandos,", view)
+	}
+}
+
+func TestView_StartupChoice_CapsLineWidthOnNarrowTerminal(t *testing.T) {
+	old := &block.Block{Command: "old command"}
+	m := modelAwaitingStartupChoice(old)
+	m.width, m.height = 20, 24 // narrower than the option text
+
+	for _, line := range strings.Split(m.View(), "\n") {
+		if got := lipgloss.Width(line); got > m.width {
+			t.Fatalf("line exceeds terminal width %d: %q (width %d)", m.width, line, got)
+		}
+	}
+}
+
+func TestHumanizeSince(t *testing.T) {
+	tests := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"just now", 10 * time.Second, "hace un momento"},
+		{"minutes", 5 * time.Minute, "hace 5m"},
+		{"hours", 3 * time.Hour, "hace 3h"},
+		{"days", 50 * time.Hour, "hace 2d"},
+		{"zero", 0, "hace un momento"},
+		{"negative (clock skew / future timestamp)", -5 * time.Hour, "hace un momento"},
+		{"absurdly large duration caps at 999d", 100000 * 24 * time.Hour, "hace 999d"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := humanizeSince(tt.d); got != tt.want {
+				t.Errorf("humanizeSince(%v) = %q, want %q", tt.d, got, tt.want)
+			}
+		})
 	}
 }
 
